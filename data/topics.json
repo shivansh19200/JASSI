@@ -1,0 +1,10 @@
+{
+  "topics": [
+    {"id": "arrays", "name": "Arrays", "estimated_hours": 4, "prerequisites": []},
+    {"id": "stacks_queues", "name": "Stacks & Queues", "estimated_hours": 5, "prerequisites": ["arrays"]},
+    {"id": "trees", "name": "Trees", "estimated_hours": 8, "prerequisites": ["stacks_queues"]},
+    {"id": "graphs", "name": "Graphs", "estimated_hours": 10, "prerequisites": ["trees"]},
+    {"id": "dynamic_programming", "name": "Dynamic Programming", "estimated_hours": 12, "prerequisites": ["arrays", "trees"]},
+    {"id": "sorting", "name": "Sorting Algorithms", "estimated_hours": 6, "prerequisites": ["arrays"]}
+  ]
+}

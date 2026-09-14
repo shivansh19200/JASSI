@@ -1,0 +1,20 @@
+{
+  "student_name": "Aanya",
+  "mastery_map": {
+    "arrays": 80,
+    "stacks_queues": 65,
+    "trees": 55,
+    "graphs": 25,
+    "dynamic_programming": 10,
+    "sorting": 70
+  },
+  "calendar_events": [
+    {"id": "ev_class_1", "title": "DSA Lecture", "day": "Monday", "start": "09:00", "end": "10:30", "type": "hard"},
+    {"id": "ev_class_2", "title": "DSA Lecture", "day": "Wednesday", "start": "09:00", "end": "10:30", "type": "hard"},
+    {"id": "ev_lab_1", "title": "Physics Lab", "day": "Tuesday", "start": "14:00", "end": "16:00", "type": "hard"},
+    {"id": "ev_dance", "title": "Dance Club", "day": "Monday", "start": "18:00", "end": "19:30", "type": "soft"},
+    {"id": "ev_coding_club", "title": "Coding Club", "day": "Thursday", "start": "17:00", "end": "18:30", "type": "soft"},
+    {"id": "ev_gym", "title": "Gym", "day": "Friday", "start": "07:00", "end": "08:00", "type": "soft"}
+  ],
+  "planning_requests": []
+}
