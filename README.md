@@ -46,12 +46,13 @@ jassi/
 
 ## Setup (Windows CMD)
 
-1. **Install Python 3.12** if you don't have it, from python.org.
+1. **Install Python 3.12** if you don't have it, from python.org. It is important because some dependencies used in the project do not run for newer versions of python.
 
 2. **Create and activate a virtual environment:**
    ```cmd
    python -m venv venv
    venv\Scripts\activate
+   py -3.12 -m venv venv
    ```
 
 3. **Install dependencies:**
