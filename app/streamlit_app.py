@@ -27,8 +27,10 @@ DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 
 st.set_page_config(page_title="JASSI · Learning Planner", page_icon="🧭", layout="wide",
                     initial_sidebar_state="expanded")
-APP_BUILD_VERSION = "2026-10-31-no-groq-schedule-single-flight"
+APP_BUILD_VERSION = "2026-10-31-plan-day-workspace-resource-relevance"
 st.session_state.setdefault("_jassi_processing", False)
+st.session_state.setdefault("selected_plan_day", None)
+st.session_state.setdefault("confirm_delete_plan", None)
 
 # ---------------------------------------------------------------------------
 # Premium visual theme
@@ -965,6 +967,7 @@ with st.sidebar:
             if st.button(label, key=f"nav_{pr['id']}", use_container_width=True,
                          type="primary" if is_active else "secondary", disabled=_processing):
                 st.session_state.selected_pr = pr["id"]
+                st.session_state.selected_plan_day = None
                 st.session_state.roadmap_open = True
                 st.rerun()
 
@@ -1269,189 +1272,154 @@ tab_today, tab_timetable, tab_settings = st.tabs(
     ["🏠 Today", "🗓️ Timetable", "⚙️ Settings"]
 )
 
-# ---- Today: the selected plan's status + its one pending check-in -------
+# ---- Plan workspace: plan -> day cards -> day detail ---------------------
 with tab_today:
     if not prs:
-        st.info("You don't have a plan yet. Describe a learning goal in the box at the "
-                 "bottom of the page — e.g. \"I wanna finish trees and graphs in 10 days\" "
-                 "— and JASSI will build one.")
+        st.info("You don't have a plan yet. Describe a learning goal below and JASSI will build one.")
     elif not pr:
-        st.info("Pick a plan from the sidebar to see its check-in and progress here.")
-    else:
-        avg_mastery = sum(pr["current_mastery"].values()) / max(1, len(pr["current_mastery"]))
-        pct = int(min(100, (avg_mastery / max(1, pr["target_mastery"])) * 100))
-        badge_class = {"active": "badge-active", "blocked": "badge-blocked",
-                        "completed": "badge-completed"}.get(pr["status"], "badge-active")
-        st.markdown(f"""
-        <div class="card">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div class="jassi-title" style="font-size:19px;">{", ".join(pr["topics"]).title()}</div>
-            <span class="badge {badge_class}">{pr['status']}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;margin-top:10px;">
-            <span class="metric-label">Progress toward target</span>
-            <span style="color:var(--text-2);font-size:12px;">{int(avg_mastery)}% / {pr['target_mastery']}%</span>
-          </div>
-          <div class="progress-outer"><div class="progress-inner" style="width:{pct}%;"></div></div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Keep the roadmap hidden until the user explicitly opens a plan
-        # from the "Your plans" list in the sidebar.
-        sessions = pr.get("sessions", [])
-        completed_count = sum(1 for sess in sessions if sess.get("status") == "completed")
-        if st.session_state.roadmap_open:
+        st.markdown("### Your learning plans")
+        st.caption("Choose a plan to open its dedicated workspace.")
+        for plan in prs:
             with st.container(border=True):
-                st.markdown(f"**📚 Learning roadmap** · {completed_count}/{len(sessions)} sessions completed")
-                if not sessions:
-                    st.info("This plan doesn't have any scheduled learning sessions yet.")
-                else:
-                    def _roadmap_sort_key(sess):
-                        return (sess.get("date") or "9999-99-99", sess.get("start", "00:00"))
-
-                    dated_sessions = sorted(sessions, key=_roadmap_sort_key)
-                    grouped = {}
-                    for sess in dated_sessions:
-                        try:
-                            session_date = datetime.strptime(sess.get("date", ""), "%Y-%m-%d").date()
-                        except (TypeError, ValueError):
-                            session_date = date.today()
-                        week_start = session_date - timedelta(days=session_date.weekday())
-                        grouped.setdefault(week_start, {}).setdefault(session_date, []).append(sess)
-
-                    for week_start, days_map in sorted(grouped.items()):
-                        week_end = week_start + timedelta(days=6)
-                        week_label = f"Week of {week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"
-                        week_sessions = [sess for day_items in days_map.values() for sess in day_items]
-                        week_done = sum(1 for sess in week_sessions if sess.get("status") == "completed")
-                        with st.expander(f"🗓️ {week_label} · {week_done}/{len(week_sessions)} sessions", expanded=True):
-                            # Use stable, compact day headings instead of nested expanders.
-                            # This avoids Streamlit wrapping every character in narrow cards.
-                            cols = st.columns(7, gap="small")
-                            for offset, col in enumerate(cols):
-                                day_date = week_start + timedelta(days=offset)
-                                day_items = days_map.get(day_date, [])
-                                done = sum(1 for item in day_items if item.get("status") == "completed")
-                                with col:
-                                    st.markdown(f"**{day_date.strftime('%a')}**")
-                                    st.caption(day_date.strftime('%d %b'))
-                                    st.caption(f"{done}/{len(day_items)} done")
-                                    if not day_items:
-                                        st.caption("—")
-                                    for sess in day_items:
-                                        sess_status = sess.get("status", "scheduled")
-                                        icon = "✅" if sess_status == "completed" else ("🔄" if sess_status == "in_progress" else "○")
-                                        resource_title = sess.get("resource_title") or sess.get("topic", "Study session").replace("_", " ").title()
-                                        duration = f"{sess.get('duration_mins', 0)} min" if sess.get("duration_mins") else "Duration TBD"
-                                        st.markdown(f"{icon} **{resource_title}**")
-                                        st.caption(f"{sess.get('start', 'Time TBD')} · {duration}")
-                                        session_url = sess.get("resource_url")
-                                        session_resources = sess.get("resources") or []
-                                        if session_resources:
-                                            st.caption("Suggested learning resources")
-                                            for resource_index, resource in enumerate(session_resources[:3], 1):
-                                                resource_title = resource.get("title") or f"YouTube resource {resource_index}"
-                                                resource_link = resource.get("url")
-                                                if isinstance(resource_link, str) and resource_link.startswith(("https://", "http://")):
-                                                    st.markdown(f"{resource_index}. [{resource_title}]({resource_link}) · YouTube")
-                                        elif isinstance(session_url, str) and session_url.startswith(("https://", "http://")):
-                                            st.markdown(f"[Open resource]({session_url})")
-                                        st.divider()
-                    st.progress(completed_count / len(sessions) if sessions else 0.0,
-                                text=f"{completed_count} of {len(sessions)} learning sessions completed")
-
-        st.markdown("**Daily check-in**")
-        pending_sessions = [s for s in pr["sessions"] if s.get("status", "scheduled") == "scheduled"]
-        if pending_sessions:
-            s = pending_sessions[0]
-            st.markdown(f"""
-            <div class="chat-bubble">
-              🤖 How did your <b>{s['topic'].title()}</b> session on {s['day']} go? ({s['resource_title']})
-            </div>
-            """, unsafe_allow_html=True)
-            with st.form(f"update_form_{s['id']}"):
-                update_text = st.text_input("Tell JASSI how it went",
-                                             placeholder="kinda did half of it, trees traversal is tricky")
-                quiz_score = st.slider("Quiz score for this topic (optional — leave at 0 if you didn't take one)",
-                                        0, 100, 0)
-                st.caption("No quiz? JASSI still updates your mastery from what you type above.")
-                submitted = st.form_submit_button("Send update", type="primary", disabled=_processing)
-            if submitted and update_text.strip():
-                client = get_client()
-                graph = build_daily_update_graph()
-                state = {
-                    "client": client, "topics_path": TOPICS_PATH, "raw_text": update_text,
-                    "session": s, "quiz_score": quiz_score if quiz_score > 0 else None,
-                    "update_topic": s["topic"], "current_mastery": pr["current_mastery"],
-                    "calendar_events": st.session_state.student["calendar_events"],
-                    "existing_sessions": pr["sessions"], "quiz_history": pr.get("quiz_history", []),
-                }
-                result = stream_graph_with_status(graph, state, UPDATE_STEP_LABELS, status_slot)
-
-                parsed = result["parsed_update"]
-                status = parsed["status"]
-                percent_done = parsed.get("percent_done")
-                struggle_note = parsed.get("struggle_note")
-                for sess in pr["sessions"]:
-                    if sess["id"] == s["id"]:
-                        sess["status"] = status
-                pr["daily_updates"].append({
-                    "session_id": s["id"], "status": status, "text": update_text,
-                    "percent_done": percent_done, "struggle_note": struggle_note,
-                    "mastery_delta": result.get("mastery_delta"),
-                    "mastery_source": result.get("mastery_update_source"),
-                    "time": datetime.now().isoformat(),
-                })
-                if quiz_score > 0:
-                    pr.setdefault("quiz_history", []).append({"topic": s["topic"], "score": quiz_score})
-                log_reasoning(result["progress_insight"])
-
-                if result.get("rescheduled_session"):
-                    new_sess = result["rescheduled_session"]
-                    pr["sessions"].append(new_sess)
-                    st.session_state.student["calendar_events"].append({
-                        "id": new_sess["id"], "title": f"{new_sess['topic'].title()} · {new_sess.get('resource_title','')}",
-                        "day": new_sess["day"], "start": new_sess["start"], "end": new_sess["end"],
-                        "type": "study_session",
-                    })
-                    pr["replan_count"] += 1
-                    log_reasoning(result["reschedule_explanation"])
-
-                delta = result.get("mastery_delta", 0)
-                delta_txt = f" (mastery {'+' if delta >= 0 else ''}{delta})" if delta else ""
-                save_student(st.session_state.student)
-                st.success(f"Got it — plan updated!{delta_txt}")
+                st.markdown(f"**{', '.join(plan.get('topics', [])).title()}** · {plan.get('status', 'active').title()}")
+                st.caption(f"{len(plan.get('sessions', []))} study sessions · {plan.get('deadline_days', '?')} day target")
+                if st.button("Open plan", key=f"open_plan_main_{plan['id']}", disabled=_processing, use_container_width=True):
+                    st.session_state.selected_pr = plan['id']
+                    st.session_state.selected_plan_day = None
+                    st.rerun()
+    else:
+        sessions = pr.get("sessions", [])
+        st.markdown(f"### {', '.join(pr.get('topics', [])).title()}")
+        st.caption("Your plan workspace · choose a day to see its tasks, learning links, and check-in.")
+        top_a, top_b = st.columns([1, 1])
+        with top_a:
+            if st.button("← All plans", key="back_to_plans", disabled=_processing):
+                st.session_state.selected_pr = None
+                st.session_state.selected_plan_day = None
                 st.rerun()
+        with top_b:
+            if st.button("🗑️ Delete entire plan", key=f"delete_plan_{pr['id']}", disabled=_processing, use_container_width=True):
+                st.session_state.confirm_delete_plan = pr['id']
+                st.rerun()
+
+        if st.session_state.get("confirm_delete_plan") == pr['id']:
+            st.warning("Delete this plan and all of its study events? This cannot be undone.")
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button("Yes, delete plan", type="primary", key="confirm_delete_plan_yes"):
+                    session_ids = {str(item.get("id")) for item in pr.get("sessions", [])}
+                    student["calendar_events"] = [ev for ev in student.get("calendar_events", []) if str(ev.get("id")) not in session_ids]
+                    student["planning_requests"] = [item for item in student.get("planning_requests", []) if item.get("id") != pr['id']]
+                    st.session_state.selected_pr = None
+                    st.session_state.selected_plan_day = None
+                    st.session_state.confirm_delete_plan = None
+                    save_student(student)
+                    st.toast("Plan and all its timetable events deleted", icon="🗑️")
+                    st.rerun()
+            with cancel_col:
+                if st.button("Cancel", key="confirm_delete_plan_no"):
+                    st.session_state.confirm_delete_plan = None
+                    st.rerun()
+
+        # Group only dates that actually contain sessions; no empty day cards.
+        day_groups = {}
+        for sess in sorted(sessions, key=lambda item: (item.get("date") or "9999-99-99", item.get("start", "00:00"))):
+            raw_date = sess.get("date")
+            try:
+                day_date = datetime.strptime(raw_date, "%Y-%m-%d").date() if raw_date else None
+            except (TypeError, ValueError):
+                day_date = None
+            key = day_date.isoformat() if day_date else sess.get("day", "Unscheduled")
+            day_groups.setdefault(key, {"date": day_date, "sessions": []})["sessions"].append(sess)
+
+        selected_day = st.session_state.get("selected_plan_day")
+        if selected_day not in day_groups:
+            st.markdown("#### Your days")
+            if not day_groups:
+                st.info("This plan has no scheduled study days yet.")
+            else:
+                cols = st.columns(2)
+                for idx, (day_key, info) in enumerate(day_groups.items()):
+                    day_sessions = info["sessions"]
+                    done = sum(1 for item in day_sessions if item.get("status") == "completed")
+                    date_label = info["date"].strftime("%A, %d %b %Y") if info["date"] else str(day_key)
+                    with cols[idx % 2]:
+                        with st.container(border=True):
+                            st.markdown(f"**🗓️ {date_label}**")
+                            st.caption(f"{len(day_sessions)} task(s) · {done}/{len(day_sessions)} completed")
+                            for item in day_sessions[:3]:
+                                st.write(f"• {item.get('resource_title') or item.get('topic', 'Study task').replace('_', ' ').title()}")
+                            if len(day_sessions) > 3:
+                                st.caption(f"+ {len(day_sessions)-3} more tasks")
+                            if st.button("Open day →", key=f"open_day_{pr['id']}_{day_key}", disabled=_processing, use_container_width=True):
+                                st.session_state.selected_plan_day = day_key
+                                st.rerun()
         else:
-            st.caption("No pending sessions — nice work! 🎉")
+            day_info = day_groups[selected_day]
+            date_label = day_info["date"].strftime("%A, %d %b %Y") if day_info["date"] else str(selected_day)
+            if st.button("← Back to days", key="back_to_days", disabled=_processing):
+                st.session_state.selected_plan_day = None
+                st.rerun()
+            st.markdown(f"#### {date_label}")
+            for sess in day_info["sessions"]:
+                with st.container(border=True):
+                    task_title = sess.get("resource_title") or sess.get("topic", "Study task").replace("_", " ").title()
+                    st.markdown(f"**{task_title}**")
+                    st.caption(f"{sess.get('start', 'Time TBD')} · {sess.get('duration_mins', 0)} min · {sess.get('status', 'scheduled').replace('_', ' ').title()}")
+                    st.write(sess.get("task_description") or sess.get("description") or f"Work through {sess.get('topic', 'the selected topic').replace('_', ' ')} and practise the key ideas.")
+                    links = sess.get("resources") or []
+                    if links:
+                        st.caption("Relevant learning resources")
+                        for n, resource in enumerate(links[:3], 1):
+                            url = resource.get("url", "")
+                            title = resource.get("title") or f"Resource {n}"
+                            if isinstance(url, str) and url.startswith(("https://", "http://")):
+                                st.markdown(f"{n}. [{title}]({url})")
+                    elif isinstance(sess.get("resource_url"), str) and sess.get("resource_url", "").startswith(("https://", "http://")):
+                        st.markdown(f"[Open learning resource]({sess['resource_url']})")
+                    else:
+                        st.caption("No verified resource found yet. Use the topic-specific YouTube search below rather than an unrelated video.")
+                        from urllib.parse import quote_plus
+                        search_text = f"{sess.get('topic', '')} {task_title} tutorial"
+                        st.markdown(f"[Search YouTube for this task](https://www.youtube.com/results?search_query={quote_plus(search_text)})")
 
-        with st.expander("Replan & check-in history"):
-            if pr["daily_updates"]:
-                for u in reversed(pr["daily_updates"]):
-                    delta = u.get("mastery_delta")
-                    delta_txt = ""
-                    if delta:
-                        delta_txt = f" · mastery {'+' if delta >= 0 else ''}{delta} ({u.get('mastery_source', 'update')})"
-                    struggle_txt = f"<br><i>Struggle: {u['struggle_note']}</i>" if u.get("struggle_note") else ""
-                    st.markdown(f"""
-                    <div class="timeline-item">
-                      <b>{u['status'].title()}</b>{delta_txt} — {u['text']}{struggle_txt}<br>
-                      <span style="color:var(--text-2);">{u['time'][:16].replace('T',' ')}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.caption("No updates yet.")
-
-        with st.expander("Recent agent activity"):
-            if st.session_state.reasoning_log:
-                for item in st.session_state.reasoning_log:
-                    st.markdown(f"""
-                    <div class="timeline-item">
-                      <span style="color:var(--text-2);">{item['time']}</span><br>{item['text']}
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.caption("No agent activity yet.")
+                    if sess.get("status", "scheduled") != "completed":
+                        with st.form(f"day_update_{sess['id']}"):
+                            update_text = st.text_area("Your progress update", placeholder="What did you finish? What was difficult? What will you do next?", key=f"day_update_text_{sess['id']}")
+                            took_quiz = st.checkbox("I took a quiz or practice test", key=f"day_quiz_taken_{sess['id']}")
+                            quiz_score = st.number_input("Score (%)", min_value=0, max_value=100, value=0, step=1, disabled=not took_quiz, key=f"day_quiz_score_{sess['id']}")
+                            submitted = st.form_submit_button("Send update", type="primary", disabled=_processing)
+                        if submitted and update_text.strip():
+                            client = get_client()
+                            graph = build_daily_update_graph()
+                            state = {
+                                "client": client, "topics_path": TOPICS_PATH, "raw_text": update_text,
+                                "session": sess, "quiz_score": int(quiz_score) if took_quiz else None,
+                                "update_topic": sess["topic"], "current_mastery": pr["current_mastery"],
+                                "calendar_events": student["calendar_events"],
+                                "existing_sessions": pr["sessions"], "quiz_history": pr.get("quiz_history", []),
+                            }
+                            result = stream_graph_with_status(graph, state, UPDATE_STEP_LABELS, status_slot)
+                            parsed = result["parsed_update"]
+                            for existing in pr["sessions"]:
+                                if existing["id"] == sess["id"]:
+                                    existing["status"] = parsed["status"]
+                            pr.setdefault("daily_updates", []).append({
+                                "session_id": sess["id"], "status": parsed["status"], "text": update_text,
+                                "percent_done": parsed.get("percent_done"), "struggle_note": parsed.get("struggle_note"),
+                                "mastery_delta": result.get("mastery_delta"), "mastery_source": result.get("mastery_update_source"),
+                                "time": datetime.now().isoformat(),
+                            })
+                            if took_quiz:
+                                pr.setdefault("quiz_history", []).append({"topic": sess["topic"], "score": int(quiz_score)})
+                            if result.get("rescheduled_session"):
+                                new_sess = result["rescheduled_session"]
+                                pr["sessions"].append(new_sess)
+                                student["calendar_events"].append({"id": new_sess["id"], "title": f"{new_sess['topic'].title()} · {new_sess.get('resource_title','')}", "day": new_sess["day"], "date": new_sess.get("date"), "start": new_sess["start"], "end": new_sess["end"], "type": "study_session"})
+                            log_reasoning(result.get("progress_insight", "Progress updated."))
+                            save_student(student)
+                            st.success("Progress saved!")
+                            st.rerun()
 
 # ---- Timetable: full width, nothing competing for attention -------------
 with tab_timetable:
