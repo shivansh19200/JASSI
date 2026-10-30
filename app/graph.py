@@ -256,9 +256,24 @@ def node_schedule_explanation(state: PlanningState) -> PlanningState:
     topics_data = feasibility_tool.merge_dynamic_topics(
         feasibility_tool.load_topics(state["topics_path"]), state.get("dynamic_topics") or []
     )
-    state["schedule_explanation"] = llm_nodes.generate_schedule_explanation(
-        state["client"], state["schedule_result"]["scheduled"], topics_data
-    )
+    scheduled = state["schedule_result"].get("scheduled", [])
+    try:
+        state["schedule_explanation"] = llm_nodes.generate_schedule_explanation(
+            state["client"], scheduled, topics_data
+        )
+    except Exception as exc:
+        # The schedule is deterministic and already built at this point. An
+        # optional narrative must never prevent the student from receiving it.
+        import logging
+        logging.warning("Groq schedule explanation failed; using fallback: %s", exc)
+        session_count = len(scheduled)
+        total_minutes = sum(int(item.get("duration_mins") or 0) for item in scheduled)
+        hours = total_minutes / 60
+        state["schedule_explanation"] = (
+            f"Your plan contains {session_count} study sessions, totalling "
+            f"{hours:.1f} hours. Sessions are arranged around your available "
+            "study time and the order of the selected topics."
+        )
     return state
 
 

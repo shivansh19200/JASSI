@@ -290,12 +290,61 @@ def analyze_progress_patterns(client: GroqClient, mastery_map: Dict[str, int],
 # ---------------------------------------------------------------------------
 def generate_schedule_explanation(client: GroqClient, scheduled_sessions: List[Dict[str, Any]],
                                    topics_data: Dict[str, Any]) -> str:
+    """Ask Groq for a narrative using a bounded summary, never the full timetable.
+
+    Schedule entries can contain resource lists, URLs and other metadata that are
+    irrelevant to an overview. Sending those fields made large plans exceed the
+    provider's HTTP payload limit. Keep the complete schedule in Python/UI and
+    send only aggregate counts plus a small sample to the model.
+    """
     system = (
         "You are a study planning AI explaining a generated schedule to a student. "
-        "In 2-3 sentences, explain the overall shape of the plan and WHY topics were ordered "
-        "the way they were (reference prerequisites where relevant). No markdown, no bullet lists."
+        "In 2-3 sentences, explain the overall shape of the plan and why topics were "
+        "ordered that way, referencing prerequisites only when supported by the data. "
+        "No markdown or bullet lists. Do not invent details."
     )
-    user = json.dumps({"sessions": scheduled_sessions, "topics": topics_data["topics"]})
+
+    sessions = scheduled_sessions or []
+    by_topic: Dict[str, Dict[str, Any]] = {}
+    days = set()
+    total_minutes = 0
+    for session in sessions:
+        topic = str(session.get("topic") or "Other")[:100]
+        item = by_topic.setdefault(topic, {"sessions": 0, "minutes": 0})
+        duration = max(0, int(session.get("duration_mins") or 0))
+        item["sessions"] += 1
+        item["minutes"] += duration
+        total_minutes += duration
+        if session.get("day"):
+            days.add(str(session["day"])[:30])
+
+    compact_topics = []
+    for topic in (topics_data or {}).get("topics", [])[:20]:
+        if not isinstance(topic, dict):
+            continue
+        compact_topics.append({
+            "id": str(topic.get("id") or "")[:80],
+            "name": str(topic.get("name") or "")[:100],
+            "prerequisites": [str(x)[:80] for x in (topic.get("prerequisites") or [])[:8]],
+        })
+
+    # Keep only scheduling facts; omit resource URLs, descriptions and metadata.
+    sample_sessions = [{
+        "topic": str(s.get("topic") or "Other")[:100],
+        "day": str(s.get("day") or "")[:30],
+        "start": str(s.get("start") or "")[:10],
+        "duration_mins": max(0, int(s.get("duration_mins") or 0)),
+    } for s in sessions[:8]]
+    summary = {
+        "total_sessions": len(sessions),
+        "total_hours": round(total_minutes / 60, 1),
+        "days_used": sorted(days)[:14],
+        "sessions_by_topic": dict(list(by_topic.items())[:20]),
+        "topic_prerequisites": compact_topics,
+        "sample_sessions": sample_sessions,
+    }
+    # A final hard cap protects against unusually long user-generated topic names.
+    user = json.dumps(summary, ensure_ascii=True, separators=(",", ":"))[:8000]
     return client.chat(system, user, temperature=0.6)
 
 
