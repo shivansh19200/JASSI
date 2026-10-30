@@ -110,7 +110,7 @@ def parse_planning_request(client: GroqClient, user_text: str, known_topic_ids: 
         "in the catalog matched)}. No prose."
     )
     raw = client.chat(system, user_text, temperature=0.2, json_mode=True)
-    fallback = {"topics": [], "target_mastery": 70, "deadline_days": 7, "is_learning_request": True,
+    fallback = {"topics": [], "target_mastery": 70, "deadline_days": 14, "is_learning_request": True,
                 "preferred_days": [],
                 "unmatched_reason": "Couldn't understand that request — please try rephrasing it."}
     return _safe_json_parse(raw, fallback)

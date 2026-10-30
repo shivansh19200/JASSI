@@ -941,7 +941,7 @@ with st.sidebar:
                 st.rerun()
 
     st.write("")
-    st.caption("💬 Describe a new learning goal in the box at the bottom to start another plan.")
+    st.caption("Select a plan above to open its daily resource-by-resource roadmap. Describe a new learning goal below to start another plan.")
 
 
 # ---------------------------------------------------------------------------
@@ -999,21 +999,34 @@ elif st.session_state.pending_time_prefs:
         "Evening (17–22)": (17 * 60, 22 * 60),
         "No preference": (None, None),
     }
-    st.caption("Optional: add your own course or playlist. One per line: Topic ID | title | URL | estimated minutes. Use 'all' as the topic for a resource that covers everything.")
-    user_refs_text = st.text_area("Your YouTube / Coursera / other resources", placeholder="graphs | Graph Algorithms playlist | https://youtube.com/playlist?list=... | 240", key="planning_user_resources")
+    st.caption("Optional: suggest a course or playlist by name or URL. Add one per line. You can also use: Topic ID | title | URL | estimated minutes. If you only provide a name, JASSI will ask you to confirm its duration before scheduling.")
+    user_refs_text = st.text_area("Your preferred courses / playlists", placeholder="Striver A2Z DSA Course on YouTube\nhttps://www.youtube.com/playlist?list=...\ngraphs | Graph Algorithms | https://example.com/course | 240", key="planning_user_resources")
     if st.button("Confirm timing", type="primary", use_container_width=True):
         state = tp["state"]
         start_min, end_min = time_ranges[time_choice]
         state["preferred_time_start"], state["preferred_time_end"] = start_min, end_min
         refs = []
         for line in user_refs_text.splitlines():
-            parts = [part.strip() for part in line.split("|")]
-            if len(parts) == 4 and parts[1] and parts[2].startswith(("https://", "http://")):
+            raw = line.strip()
+            if not raw:
+                continue
+            parts = [part.strip() for part in raw.split("|")]
+            # Structured form: topic | title | URL | minutes
+            if len(parts) == 4 and parts[1]:
                 try:
                     minutes = max(15, int(parts[3]))
-                    refs.append({"topic": parts[0] or "all", "title": parts[1], "url": parts[2], "duration_mins": minutes})
                 except ValueError:
-                    continue
+                    minutes = 120
+                refs.append({"topic": parts[0] or "all", "title": parts[1],
+                             "url": parts[2] if parts[2].startswith(("https://", "http://")) else "",
+                             "duration_mins": minutes, "duration_confirmed": parts[3].isdigit()})
+            elif len(parts) == 1:
+                # Natural-language course name or URL. Do not silently discard it.
+                is_url = raw.startswith(("https://", "http://"))
+                title = raw.rstrip("/").split("/")[-1].replace("-", " ") if is_url else raw
+                refs.append({"topic": "all", "title": title or raw,
+                             "url": raw if is_url else "", "duration_mins": 120,
+                             "duration_confirmed": False})
         state["reference_resources"] = refs
         st.session_state.pending_time_prefs = None
         _continue_planning_after_days(state)
@@ -1146,6 +1159,14 @@ elif st.session_state.pending_resource_choice:
                       {('<div class="path-pros-cons"><b>Your links</b><ul>'+resource_links+'</ul></div>') if resource_links else ''}
                     </div>
                     """, unsafe_allow_html=True)
+                    if path.get("user_suggested"):
+                        st.info("This option includes the course you suggested. Its duration is an initial estimate; edit the session duration in the path before building your schedule if you know the actual course length.")
+                        for session_index, suggested_session in enumerate(path.get("sessions", [])):
+                            suggested_session["duration_mins"] = st.number_input(
+                                f"Duration in minutes · {suggested_session['title']}",
+                                min_value=15, max_value=100000,
+                                value=int(suggested_session.get("duration_mins", 120)),
+                                step=15, key=f"suggested_duration_{topic}_{i}_{session_index}")
                     if st.button(f"Choose “{path['title']}”", key=f"path_{topic}_{i}", use_container_width=True):
                         rc["chosen"][topic] = path
                         st.rerun()
@@ -1238,6 +1259,58 @@ with tab_today:
           <div class="progress-outer"><div class="progress-inner" style="width:{pct}%;"></div></div>
         </div>
         """, unsafe_allow_html=True)
+
+        # A plan is a roadmap, not just a progress bar. Show every selected
+        # resource in the order and time JASSI expects the student to cover it.
+        sessions = pr.get("sessions", [])
+        completed_count = sum(1 for sess in sessions if sess.get("status") == "completed")
+        with st.expander(f"📚 Your learning roadmap · {completed_count}/{len(sessions)} sessions completed", expanded=True):
+            if not sessions:
+                st.info("This plan doesn't have any scheduled learning sessions yet.")
+            else:
+                def _roadmap_sort_key(sess):
+                    return (sess.get("date") or "9999-99-99", sess.get("start", "00:00"))
+
+                dated_sessions = sorted(sessions, key=_roadmap_sort_key)
+                grouped = {}
+                for sess in dated_sessions:
+                    try:
+                        session_date = datetime.strptime(sess.get("date", ""), "%Y-%m-%d").date()
+                    except (TypeError, ValueError):
+                        session_date = date.today()
+                    week_start = session_date - timedelta(days=session_date.weekday())
+                    grouped.setdefault(week_start, {}).setdefault(session_date, []).append(sess)
+
+                for week_start, days_map in sorted(grouped.items()):
+                    week_end = week_start + timedelta(days=6)
+                    week_label = f"Week of {week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"
+                    week_sessions = [sess for day_items in days_map.values() for sess in day_items]
+                    week_done = sum(1 for sess in week_sessions if sess.get("status") == "completed")
+                    with st.expander(f"🗓️ {week_label} · {week_done}/{len(week_sessions)} sessions", expanded=True):
+                        # Seven labelled day columns; each day expands to its resource-level tasks.
+                        cols = st.columns(7)
+                        for offset, col in enumerate(cols):
+                            day_date = week_start + timedelta(days=offset)
+                            day_items = days_map.get(day_date, [])
+                            done = sum(1 for item in day_items if item.get("status") == "completed")
+                            day_title = day_date.strftime("%a %d %b")
+                            with col:
+                                with st.expander(f"{day_title}\n{done}/{len(day_items)}", expanded=False):
+                                    if not day_items:
+                                        st.caption("No study planned")
+                                    for sess in day_items:
+                                        sess_status = sess.get("status", "scheduled")
+                                        icon = "✅" if sess_status == "completed" else ("⏳" if sess_status == "in_progress" else "⬜")
+                                        resource_title = sess.get("resource_title") or sess.get("topic", "Study session").replace("_", " ").title()
+                                        duration = f"{sess.get('duration_mins', 0) / 60:g}h" if sess.get("duration_mins") else "Duration TBD"
+                                        st.markdown(f"**{icon} {resource_title}**")
+                                        st.caption(f"{sess.get('start', 'Time TBD')}–{sess.get('end', '')} · {duration}")
+                                        st.caption(sess.get("topic", "Learning").replace("_", " ").title())
+                                        if sess.get("resource_url", "").startswith(("https://", "http://")):
+                                            st.link_button("Open resource", sess["resource_url"], key=f"day_resource_{sess['id']}")
+                                        st.divider()
+                st.progress(completed_count / len(sessions) if sessions else 0.0,
+                            text=f"{completed_count} of {len(sessions)} learning sessions completed")
 
         st.markdown("**Daily check-in**")
         pending_sessions = [s for s in pr["sessions"] if s.get("status", "scheduled") == "scheduled"]

@@ -53,6 +53,16 @@ class TestScheduler(unittest.TestCase):
             self.assertGreaterEqual(int(session["start"][:2]), 9)
             self.assertLessEqual(int(session["end"][:2]), 18)
 
+    def test_scheduled_session_keeps_resource_url_for_roadmap(self):
+        item = [{"topic": "ml", "duration_mins": 60, "order": 0,
+                 "resource_title": "Intro to ML", "resource_url": "https://example.com/ml"}]
+        result = scheduler.build_schedule_dated(
+            item, [], start_date=__import__("datetime").date(2026, 11, 2),
+            deadline_days=2, wake_start="09:00", sleep_start="18:00",
+            max_daily_study_hours=2.0,
+        )
+        self.assertEqual(result["scheduled"][0]["resource_url"], "https://example.com/ml")
+
     def test_does_not_schedule_during_meal_breaks(self):
         result = scheduler.build_schedule_dated(
             [{"topic": "trees", "duration_mins": 60, "order": 0}], [],

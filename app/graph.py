@@ -166,6 +166,24 @@ def node_generate_resource_paths(state: PlanningState) -> PlanningState:
             subtopics=info.get("subtopics"), candidate_resources=candidate_resources,
         )
         paths = result.get("paths", [])
+        # Student-supplied resources must remain visible as a first-class choice,
+        # even if the model omits them from its generated alternatives.
+        supplied_path_sessions = []
+        for ref_index, ref in enumerate(matching_refs):
+            resource_id = f"user_resource_{topic}_{ref_index}"
+            supplied_path_sessions.append({
+                "title": ref["title"], "duration_mins": int(ref.get("duration_mins") or 120),
+                "resource_id": resource_id, "resource_url": ref.get("url") or None,
+                "duration_estimated": not ref.get("duration_confirmed", False),
+            })
+        if supplied_path_sessions:
+            paths.insert(0, {
+                "title": "Your suggested resource" if len(supplied_path_sessions) == 1 else "Your suggested resources",
+                "pros": ["Uses the course or playlist you asked JASSI to consider"],
+                "cons": ["Confirm the total duration before scheduling"],
+                "sessions": supplied_path_sessions,
+                "user_suggested": True,
+            })
         resource_by_id = {r["id"]: r for r in (candidate_resources or [])}
         for path in paths:
             for session in path.get("sessions", []):

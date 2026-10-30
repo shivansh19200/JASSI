@@ -68,9 +68,8 @@ def verify_plan(sessions: List[Dict[str, Any]], calendar_events: List[Dict[str, 
                 issues.append(f"Prerequisite violation: '{p}' is scheduled after '{topic}', "
                                f"but '{topic}' requires '{p}' first.")
 
-    # 3. Deadline check: all sessions must fall within the deadline window (modeled as one week cycle)
-    # (Weekly-repeating calendar model — deadline compliance is checked at the required-hours stage;
-    #  here we simply confirm every session was placed.)
+    # 3. Deadline check: the dated scheduler places sessions inside the full deadline window.
+    # Feasibility is checked against that same window before scheduling; here we confirm placement.
 
     passed = len(issues) == 0
     friendly = []
