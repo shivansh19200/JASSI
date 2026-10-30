@@ -27,6 +27,8 @@ DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 
 st.set_page_config(page_title="JASSI · Learning Planner", page_icon="🧭", layout="wide",
                     initial_sidebar_state="expanded")
+APP_BUILD_VERSION = "2026-10-31-no-groq-schedule-single-flight"
+st.session_state.setdefault("_jassi_processing", False)
 
 # ---------------------------------------------------------------------------
 # Premium visual theme
@@ -385,6 +387,23 @@ def save_student(data):
         json.dump(data, f, indent=2)
 
 
+def _single_flight_action(fn):
+    """Prevent duplicate execution of expensive actions in one Streamlit session."""
+    from functools import wraps
+
+    @wraps(fn)
+    def _wrapped(*args, **kwargs):
+        if st.session_state.get("_jassi_processing", False):
+            st.info("JASSI is already processing that request. Please wait for it to finish.")
+            return None
+        st.session_state["_jassi_processing"] = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            st.session_state["_jassi_processing"] = False
+    return _wrapped
+
+
 if "student" not in st.session_state:
     st.session_state.student = load_student()
 st.session_state.student.setdefault("study_preferences", {
@@ -652,7 +671,7 @@ def render_editable_timetable_grid(events_by_day: dict, day_order: list):
                         time_range = f'{_format_display_time(ev["start"])}–{_format_display_time(ev["end"])}'
                         label = f'{icon} {ev["title"][:16]}'
                         if st.button(label, key=f"evbtn_{ev['id']}_{hours[r]}", use_container_width=True,
-                                     help=f"{ev['title']} · {time_range}"):
+                                     help=f"{ev['title']} · {time_range}", disabled=_processing):
                             edit_event_dialog(ev)
 
 
@@ -664,6 +683,7 @@ UPDATE_STEP_LABELS = {
 }
 
 
+@_single_flight_action
 def stream_graph_with_status(graph, initial_state: dict, step_labels: dict, slot) -> dict:
     """Streams a compiled LangGraph graph node-by-node, updating `slot` with a
     centered spinning status ('..retrieving', '..working on it', etc.)
@@ -692,6 +712,7 @@ def stream_graph_with_status(graph, initial_state: dict, step_labels: dict, slot
 # choose a resource path. Each pause stashes the in-progress state in
 # session_state and resumes it on the next Streamlit rerun.
 # ---------------------------------------------------------------------------
+@_single_flight_action
 def create_planning_request_flow(nl_input: str):
     """Kicks off a new planning request: parses the goal, then asks for a
     day-of-week preference (if the student didn't already state one) before
@@ -812,6 +833,7 @@ def build_sessions_from_chosen_paths_safe(chosen_paths: dict, state: dict):
     return build_sessions_from_chosen_paths(chosen_paths)
 
 
+@_single_flight_action
 def _build_schedule_and_continue(pr_id: str, state: dict):
     """Runs the scheduler; if it finds the student's preferred time window is
     entirely blocked by an existing commitment, pauses to ask them how to
@@ -892,6 +914,7 @@ status_slot = st.empty()
 
 student = st.session_state.student
 prs = student["planning_requests"]
+_processing = bool(st.session_state.get("_jassi_processing", False))
 
 # ---------------------------------------------------------------------------
 # Sidebar — pure navigation. Just "which plan am I looking at", nothing else.
@@ -923,7 +946,7 @@ with st.sidebar:
         dinner_time = st.time_input("Dinner break starts", value=datetime.strptime(prefs.get("dinner_start", "19:30"), "%H:%M").time())
         break_mins = st.selectbox("Break between study sessions", [5, 10, 15, 20, 30],
                                   index=[5, 10, 15, 20, 30].index(int(prefs.get("break_minutes", 15))))
-        if st.button("Save routine", use_container_width=True):
+        if st.button("Save routine", use_container_width=True, disabled=_processing):
             prefs.update({"max_daily_study_hours": max_hours, "wake_start": wake_time.strftime("%H:%M"),
                           "sleep_start": sleep_time.strftime("%H:%M"), "lunch_start": lunch_time.strftime("%H:%M"),
                           "dinner_start": dinner_time.strftime("%H:%M"), "break_minutes": break_mins})
@@ -940,7 +963,7 @@ with st.sidebar:
             dot = status_dot.get(pr["status"], "🟢")
             label = f"{dot} {', '.join(pr['topics']).title()}"
             if st.button(label, key=f"nav_{pr['id']}", use_container_width=True,
-                         type="primary" if is_active else "secondary"):
+                         type="primary" if is_active else "secondary", disabled=_processing):
                 st.session_state.selected_pr = pr["id"]
                 st.session_state.roadmap_open = True
                 st.rerun()
@@ -970,13 +993,13 @@ if st.session_state.pending_day_prefs:
                              label_visibility="collapsed")
     c1, c2 = st.columns([1, 1])
     with c1:
-        if st.button("Confirm days", type="primary", use_container_width=True):
+        if st.button("Confirm days", type="primary", use_container_width=True, disabled=_processing):
             state = dp["state"]
             state["preferred_days"] = picked if len(picked) < 7 else []
             st.session_state.pending_day_prefs = None
             _ask_time_prefs(state)
     with c2:
-        if st.button("No preference — any day is fine", use_container_width=True):
+        if st.button("No preference — any day is fine", use_container_width=True, disabled=_processing):
             state = dp["state"]
             state["preferred_days"] = []
             st.session_state.pending_day_prefs = None
@@ -1006,7 +1029,7 @@ elif st.session_state.pending_time_prefs:
     }
     st.caption("Optional: suggest a course or playlist by name or URL. JASSI will look up a link when you provide only a name (and fall back to a targeted search link if lookup is unavailable). Add one per line. You can also use: Topic ID | title | URL | estimated minutes. Confirm the duration before scheduling.")
     user_refs_text = st.text_area("Your preferred courses / playlists", placeholder="Striver A2Z DSA Course on YouTube\nhttps://www.youtube.com/playlist?list=...\ngraphs | Graph Algorithms | https://example.com/course | 240", key="planning_user_resources")
-    if st.button("Confirm timing", type="primary", use_container_width=True):
+    if st.button("Confirm timing", type="primary", use_container_width=True, disabled=_processing):
         state = tp["state"]
         start_min, end_min = time_ranges[time_choice]
         state["preferred_time_start"], state["preferred_time_end"] = start_min, end_min
@@ -1070,7 +1093,7 @@ elif st.session_state.pending_tradeoffs:
           </div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Start a new request", use_container_width=True):
+        if st.button("Start a new request", use_container_width=True, disabled=_processing):
             st.session_state.pending_tradeoffs = None
             st.rerun()
         st.stop()
@@ -1096,7 +1119,7 @@ elif st.session_state.pending_tradeoffs:
               <div style="color:var(--text-1);font-size:12.5px;margin-top:6px;">{opt['description']}</div>
             </div>
             """, unsafe_allow_html=True)
-            if st.button(f"Choose {opt['id']}", key=f"tradeoff_{opt['id']}", use_container_width=True):
+            if st.button(f"Choose {opt['id']}", key=f"tradeoff_{opt['id']}", use_container_width=True, disabled=_processing):
                 student = st.session_state.student
                 state = tr["result"]
                 moved_ids = []
@@ -1180,7 +1203,7 @@ elif st.session_state.pending_resource_choice:
                                 min_value=15, max_value=100000,
                                 value=int(suggested_session.get("duration_mins", 120)),
                                 step=15, key=f"suggested_duration_{topic}_{i}_{session_index}")
-                    if st.button(f"Choose “{path['title']}”", key=f"path_{topic}_{i}", use_container_width=True):
+                    if st.button(f"Choose “{path['title']}”", key=f"path_{topic}_{i}", use_container_width=True, disabled=_processing):
                         rc["chosen"][topic] = path
                         st.rerun()
         st.write("")
@@ -1188,14 +1211,14 @@ elif st.session_state.pending_resource_choice:
     all_chosen = len(rc["chosen"]) == len(options)
     c1, c2 = st.columns([1, 1])
     with c1:
-        if st.button("Build my schedule", type="primary", use_container_width=True, disabled=not all_chosen):
+        if st.button("Build my schedule", type="primary", use_container_width=True, disabled=(not all_chosen) or _processing):
             ordered_chosen = {opt["topic"]: rc["chosen"][opt["topic"]] for opt in options}
             state = rc["state"]
             if rc.get("replan_count"):
                 state["_replan_count"] = rc["replan_count"]
             finalize_plan_from_paths(rc["pr_id"], state, ordered_chosen)
     with c2:
-        if st.button("Cancel this plan", use_container_width=True):
+        if st.button("Cancel this plan", use_container_width=True, disabled=_processing):
             st.session_state.pending_resource_choice = None
             st.rerun()
     if not all_chosen:
@@ -1219,14 +1242,14 @@ elif st.session_state.pending_schedule_conflict:
     c1, c2 = st.columns([1, 1])
     with c1:
         label = "Reschedule that block" if is_soft else "It's fixed — can't move it"
-        if st.button(label, type="primary", use_container_width=True, disabled=not is_soft):
+        if st.button(label, type="primary", use_container_width=True, disabled=(not is_soft) or _processing):
             state = sc["state"]
             state.setdefault("moved_soft_event_ids", [])
             state["moved_soft_event_ids"] = list(set(state["moved_soft_event_ids"] + [conflict["id"]]))
             st.session_state.pending_schedule_conflict = None
             _build_schedule_and_continue(sc["pr_id"], state)
     with c2:
-        if st.button("Work around it — schedule elsewhere", use_container_width=True):
+        if st.button("Work around it — schedule elsewhere", use_container_width=True, disabled=_processing):
             state = sc["state"]
             state["ignore_time_conflict"] = True
             st.session_state.pending_schedule_conflict = None
@@ -1352,7 +1375,7 @@ with tab_today:
                 quiz_score = st.slider("Quiz score for this topic (optional — leave at 0 if you didn't take one)",
                                         0, 100, 0)
                 st.caption("No quiz? JASSI still updates your mastery from what you type above.")
-                submitted = st.form_submit_button("Send update", type="primary")
+                submitted = st.form_submit_button("Send update", type="primary", disabled=_processing)
             if submitted and update_text.strip():
                 client = get_client()
                 graph = build_daily_update_graph()
@@ -1479,7 +1502,7 @@ with tab_settings:
             start = c1.time_input("Start")
             end = c2.time_input("End")
             etype = st.radio("Type", ["hard", "soft"], horizontal=True)
-            if st.form_submit_button("Add event", use_container_width=True):
+            if st.form_submit_button("Add event", use_container_width=True, disabled=_processing):
                 existing = st.session_state.student["calendar_events"]
                 resolved = resolve_event_time_conflict(
                     existing, day, start.strftime("%H:%M"), end.strftime("%H:%M")
@@ -1504,7 +1527,7 @@ with tab_settings:
                     st.rerun()
     with tab2:
         img_file = st.file_uploader("Upload timetable screenshot", type=["png", "jpg", "jpeg"])
-        if img_file and st.button("Parse with AI", use_container_width=True):
+        if img_file and st.button("Parse with AI", use_container_width=True, disabled=_processing):
             client = get_client()
             render_status(status_slot, "🖼️", "Reading your timetable...")
             try:
@@ -1519,7 +1542,7 @@ with tab_settings:
                 st.error(str(e))
     with tab3:
         st.caption("Connect Google Calendar to import this week's events.")
-        if st.button("Connect Google Calendar", use_container_width=True):
+        if st.button("Connect Google Calendar", use_container_width=True, disabled=_processing):
             st.info("OAuth flow not wired up in this demo build — set GOOGLE_OAUTH_CLIENT_ID/SECRET "
                     "in .env and implement the redirect in app/tools/constraint_parser.py "
                     "(parse_google_calendar_events is ready to receive the fetched events).")
@@ -1528,7 +1551,7 @@ with tab_settings:
 
 st.markdown("""
 <div style="text-align:center;color:var(--text-2);font-size:11px;margin-top:24px;padding:14px;">
-  JASSI · Agentic AI Learning Planner · Powered by Groq + LangGraph + FAISS
+  JASSI · Agentic AI Learning Planner · Powered by Groq + LangGraph + FAISS · Build 2026-10-31
 </div>
 """, unsafe_allow_html=True)
 
@@ -1544,6 +1567,6 @@ _chat_placeholder = (
     "Answer the question above before starting a new plan..." if _awaiting_answer
     else "Describe your learning goal — e.g. \"I wanna finish trees and graphs in 10 days\""
 )
-new_goal_text = st.chat_input(_chat_placeholder, disabled=_awaiting_answer)
+new_goal_text = st.chat_input(_chat_placeholder, disabled=(_awaiting_answer or _processing))
 if new_goal_text and new_goal_text.strip() and not _awaiting_answer:
     create_planning_request_flow(new_goal_text.strip())
