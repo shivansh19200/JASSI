@@ -14,6 +14,7 @@ load_dotenv()
 from app.nodes.llm_nodes import GroqClient
 from app.tools import feasibility as feasibility_tool
 from app.tools.constraint_parser import manual_event, parse_image_with_llm, resolve_event_time_conflict
+from app.tools.resource_lookup import resolve_resource_url
 from app.vectorstore.resource_retriever import ResourceRetriever
 from app.graph import build_planning_request_graph, build_daily_update_graph
 
@@ -999,7 +1000,7 @@ elif st.session_state.pending_time_prefs:
         "Evening (17–22)": (17 * 60, 22 * 60),
         "No preference": (None, None),
     }
-    st.caption("Optional: suggest a course or playlist by name or URL. Add one per line. You can also use: Topic ID | title | URL | estimated minutes. If you only provide a name, JASSI will ask you to confirm its duration before scheduling.")
+    st.caption("Optional: suggest a course or playlist by name or URL. JASSI will look up a link when you provide only a name (and fall back to a targeted search link if lookup is unavailable). Add one per line. You can also use: Topic ID | title | URL | estimated minutes. Confirm the duration before scheduling.")
     user_refs_text = st.text_area("Your preferred courses / playlists", placeholder="Striver A2Z DSA Course on YouTube\nhttps://www.youtube.com/playlist?list=...\ngraphs | Graph Algorithms | https://example.com/course | 240", key="planning_user_resources")
     if st.button("Confirm timing", type="primary", use_container_width=True):
         state = tp["state"]
@@ -1017,16 +1018,19 @@ elif st.session_state.pending_time_prefs:
                     minutes = max(15, int(parts[3]))
                 except ValueError:
                     minutes = 120
+                supplied_url = parts[2] if parts[2].startswith(("https://", "http://")) else ""
+                resolved_url, url_source = (supplied_url, "direct") if supplied_url else resolve_resource_url(parts[1])
                 refs.append({"topic": parts[0] or "all", "title": parts[1],
-                             "url": parts[2] if parts[2].startswith(("https://", "http://")) else "",
+                             "url": resolved_url, "url_source": url_source,
                              "duration_mins": minutes, "duration_confirmed": parts[3].isdigit()})
             elif len(parts) == 1:
                 # Natural-language course name or URL. Do not silently discard it.
                 is_url = raw.startswith(("https://", "http://"))
                 title = raw.rstrip("/").split("/")[-1].replace("-", " ") if is_url else raw
+                resolved_url, url_source = resolve_resource_url(title or raw)
                 refs.append({"topic": "all", "title": title or raw,
-                             "url": raw if is_url else "", "duration_mins": 120,
-                             "duration_confirmed": False})
+                             "url": resolved_url, "url_source": url_source,
+                             "duration_mins": 120, "duration_confirmed": False})
         state["reference_resources"] = refs
         st.session_state.pending_time_prefs = None
         _continue_planning_after_days(state)
@@ -1147,7 +1151,12 @@ elif st.session_state.pending_resource_choice:
                     pros = "".join(f"<li>{p}</li>" for p in path.get("pros", []))
                     cons = "".join(f"<li>{c}</li>" for c in path.get("cons", []))
                     total_mins = sum(s.get("duration_mins", 0) for s in path.get("sessions", []))
-                    resource_links = "".join(f'<li><a href="{s["resource_url"]}" target="_blank" rel="noopener">{s["title"]}</a></li>' for s in path.get("sessions", []) if s.get("resource_url", "").startswith(("https://", "http://")))
+                    resource_links = "".join(
+                        f'<li><a href="{s.get("resource_url", "")}" target="_blank" rel="noopener">{s.get("title") or "Open learning resource"}</a></li>'
+                        for s in path.get("sessions", [])
+                        if isinstance(s.get("resource_url"), str)
+                        and s.get("resource_url", "").startswith(("https://", "http://"))
+                    )
                     st.markdown(f"""
                     <div class="path-card">
                       <b>{path['title']}</b>
@@ -1306,8 +1315,9 @@ with tab_today:
                                         st.markdown(f"**{icon} {resource_title}**")
                                         st.caption(f"{sess.get('start', 'Time TBD')}–{sess.get('end', '')} · {duration}")
                                         st.caption(sess.get("topic", "Learning").replace("_", " ").title())
-                                        if sess.get("resource_url", "").startswith(("https://", "http://")):
-                                            st.link_button("Open resource", sess["resource_url"], key=f"day_resource_{sess['id']}")
+                                        session_url = sess.get("resource_url")
+                                        if isinstance(session_url, str) and session_url.startswith(("https://", "http://")):
+                                            st.link_button("Open resource", session_url, key=f"day_resource_{sess.get('id', uuid.uuid4().hex)}")
                                         st.divider()
                 st.progress(completed_count / len(sessions) if sessions else 0.0,
                             text=f"{completed_count} of {len(sessions)} learning sessions completed")
