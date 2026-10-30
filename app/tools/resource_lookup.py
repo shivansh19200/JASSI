@@ -68,3 +68,52 @@ def resolve_resource_url(title: str, preferred_platform: str = "YouTube") -> tup
     if platform == "udemy":
         return f"https://www.udemy.com/courses/search/?q={quote_plus(title)}", "search_link"
     return f"https://www.youtube.com/results?search_query={quote_plus(title)}", "search_link"
+
+
+def recommend_youtube_resources(topic: str, task: str, client=None, limit: int = 3) -> list[dict]:
+    """Use Groq to suggest focused search queries, then resolve them to real YouTube results.
+
+    URLs are taken from search results, never invented by the LLM. If Groq is unavailable,
+    use a direct topic/task search query and return only URLs found by DDGS.
+    """
+    import json
+    queries = []
+    if client is not None:
+        try:
+            raw = client.chat(
+                "You are a learning-resource researcher. Return JSON only: "
+                '{"queries":["...","...","..."]}. Create exactly three specific YouTube search queries '
+                "for high-quality tutorials that teach the requested task. Do not provide URLs, channel names, "
+                "or claim that a particular video exists.",
+                f"Topic: {topic}\nStudy task: {task}\nReturn three distinct focused YouTube search queries.",
+                temperature=0.2, json_mode=True,
+            )
+            parsed = json.loads(raw)
+            queries = [str(q).strip() for q in parsed.get("queries", []) if str(q).strip()][:3]
+        except Exception:
+            queries = []
+    if not queries:
+        queries = [f"{task} {topic} tutorial", f"{topic} {task} explained", f"{topic} {task} practice"]
+
+    found, seen = [], set()
+    try:
+        from ddgs import DDGS  # type: ignore
+        with DDGS() as ddgs:
+            for query in queries:
+                for item in ddgs.text(f"{query} site:youtube.com/watch OR site:youtu.be", max_results=5):
+                    url = (item.get("href") or item.get("url") or "").strip()
+                    parsed_url = urlparse(url)
+                    host = parsed_url.netloc.lower()
+                    if not (host.endswith("youtube.com") or host.endswith("youtu.be")):
+                        continue
+                    if "/watch" not in parsed_url.path and host.endswith("youtube.com"):
+                        continue
+                    if url in seen:
+                        continue
+                    seen.add(url)
+                    found.append({"title": item.get("title") or f"{task} tutorial", "url": url, "platform": "YouTube"})
+                    if len(found) >= limit:
+                        return found
+    except Exception:
+        pass
+    return found

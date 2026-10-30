@@ -1323,7 +1323,15 @@ with tab_today:
                                         st.markdown(f"{icon} **{resource_title}**")
                                         st.caption(f"{sess.get('start', 'Time TBD')} · {duration}")
                                         session_url = sess.get("resource_url")
-                                        if isinstance(session_url, str) and session_url.startswith(("https://", "http://")):
+                                        session_resources = sess.get("resources") or []
+                                        if session_resources:
+                                            st.caption("Suggested learning resources")
+                                            for resource_index, resource in enumerate(session_resources[:3], 1):
+                                                resource_title = resource.get("title") or f"YouTube resource {resource_index}"
+                                                resource_link = resource.get("url")
+                                                if isinstance(resource_link, str) and resource_link.startswith(("https://", "http://")):
+                                                    st.markdown(f"{resource_index}. [{resource_title}]({resource_link}) · YouTube")
+                                        elif isinstance(session_url, str) and session_url.startswith(("https://", "http://")):
                                             st.markdown(f"[Open resource]({session_url})")
                                         st.divider()
                     st.progress(completed_count / len(sessions) if sessions else 0.0,
