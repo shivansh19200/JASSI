@@ -393,6 +393,8 @@ st.session_state.student.setdefault("study_preferences", {
 })
 if "selected_pr" not in st.session_state:
     st.session_state.selected_pr = None
+if "roadmap_open" not in st.session_state:
+    st.session_state.roadmap_open = False
 if "reasoning_log" not in st.session_state:
     st.session_state.reasoning_log = []
 if "pending_tradeoffs" not in st.session_state:
@@ -873,6 +875,7 @@ def _build_schedule_and_continue(pr_id: str, state: dict):
     }
     student["planning_requests"].append(new_pr)
     st.session_state.selected_pr = pr_id
+    st.session_state.roadmap_open = False
     log_reasoning(state["schedule_explanation"])
     st.session_state.pending_resource_choice = None
     save_student(student)
@@ -939,10 +942,11 @@ with st.sidebar:
             if st.button(label, key=f"nav_{pr['id']}", use_container_width=True,
                          type="primary" if is_active else "secondary"):
                 st.session_state.selected_pr = pr["id"]
+                st.session_state.roadmap_open = True
                 st.rerun()
 
     st.write("")
-    st.caption("Select a plan above to open its daily resource-by-resource roadmap. Describe a new learning goal below to start another plan.")
+    st.caption("Select a plan above to view its day-by-day roadmap. Describe a new learning goal below to start another plan.")
 
 
 # ---------------------------------------------------------------------------
@@ -1269,58 +1273,61 @@ with tab_today:
         </div>
         """, unsafe_allow_html=True)
 
-        # A plan is a roadmap, not just a progress bar. Show every selected
-        # resource in the order and time JASSI expects the student to cover it.
+        # Keep the roadmap hidden until the user explicitly opens a plan
+        # from the "Your plans" list in the sidebar.
         sessions = pr.get("sessions", [])
         completed_count = sum(1 for sess in sessions if sess.get("status") == "completed")
-        with st.expander(f"📚 Your learning roadmap · {completed_count}/{len(sessions)} sessions completed", expanded=True):
-            if not sessions:
-                st.info("This plan doesn't have any scheduled learning sessions yet.")
-            else:
-                def _roadmap_sort_key(sess):
-                    return (sess.get("date") or "9999-99-99", sess.get("start", "00:00"))
+        if st.session_state.roadmap_open:
+            with st.container(border=True):
+                st.markdown(f"**📚 Learning roadmap** · {completed_count}/{len(sessions)} sessions completed")
+                if not sessions:
+                    st.info("This plan doesn't have any scheduled learning sessions yet.")
+                else:
+                    def _roadmap_sort_key(sess):
+                        return (sess.get("date") or "9999-99-99", sess.get("start", "00:00"))
 
-                dated_sessions = sorted(sessions, key=_roadmap_sort_key)
-                grouped = {}
-                for sess in dated_sessions:
-                    try:
-                        session_date = datetime.strptime(sess.get("date", ""), "%Y-%m-%d").date()
-                    except (TypeError, ValueError):
-                        session_date = date.today()
-                    week_start = session_date - timedelta(days=session_date.weekday())
-                    grouped.setdefault(week_start, {}).setdefault(session_date, []).append(sess)
+                    dated_sessions = sorted(sessions, key=_roadmap_sort_key)
+                    grouped = {}
+                    for sess in dated_sessions:
+                        try:
+                            session_date = datetime.strptime(sess.get("date", ""), "%Y-%m-%d").date()
+                        except (TypeError, ValueError):
+                            session_date = date.today()
+                        week_start = session_date - timedelta(days=session_date.weekday())
+                        grouped.setdefault(week_start, {}).setdefault(session_date, []).append(sess)
 
-                for week_start, days_map in sorted(grouped.items()):
-                    week_end = week_start + timedelta(days=6)
-                    week_label = f"Week of {week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"
-                    week_sessions = [sess for day_items in days_map.values() for sess in day_items]
-                    week_done = sum(1 for sess in week_sessions if sess.get("status") == "completed")
-                    with st.expander(f"🗓️ {week_label} · {week_done}/{len(week_sessions)} sessions", expanded=True):
-                        # Seven labelled day columns; each day expands to its resource-level tasks.
-                        cols = st.columns(7)
-                        for offset, col in enumerate(cols):
-                            day_date = week_start + timedelta(days=offset)
-                            day_items = days_map.get(day_date, [])
-                            done = sum(1 for item in day_items if item.get("status") == "completed")
-                            day_title = day_date.strftime("%a %d %b")
-                            with col:
-                                with st.expander(f"{day_title}\n{done}/{len(day_items)}", expanded=False):
+                    for week_start, days_map in sorted(grouped.items()):
+                        week_end = week_start + timedelta(days=6)
+                        week_label = f"Week of {week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"
+                        week_sessions = [sess for day_items in days_map.values() for sess in day_items]
+                        week_done = sum(1 for sess in week_sessions if sess.get("status") == "completed")
+                        with st.expander(f"🗓️ {week_label} · {week_done}/{len(week_sessions)} sessions", expanded=True):
+                            # Use stable, compact day headings instead of nested expanders.
+                            # This avoids Streamlit wrapping every character in narrow cards.
+                            cols = st.columns(7, gap="small")
+                            for offset, col in enumerate(cols):
+                                day_date = week_start + timedelta(days=offset)
+                                day_items = days_map.get(day_date, [])
+                                done = sum(1 for item in day_items if item.get("status") == "completed")
+                                with col:
+                                    st.markdown(f"**{day_date.strftime('%a')}**")
+                                    st.caption(day_date.strftime('%d %b'))
+                                    st.caption(f"{done}/{len(day_items)} done")
                                     if not day_items:
-                                        st.caption("No study planned")
+                                        st.caption("—")
                                     for sess in day_items:
                                         sess_status = sess.get("status", "scheduled")
-                                        icon = "✅" if sess_status == "completed" else ("⏳" if sess_status == "in_progress" else "⬜")
+                                        icon = "✅" if sess_status == "completed" else ("🔄" if sess_status == "in_progress" else "○")
                                         resource_title = sess.get("resource_title") or sess.get("topic", "Study session").replace("_", " ").title()
-                                        duration = f"{sess.get('duration_mins', 0) / 60:g}h" if sess.get("duration_mins") else "Duration TBD"
-                                        st.markdown(f"**{icon} {resource_title}**")
-                                        st.caption(f"{sess.get('start', 'Time TBD')}–{sess.get('end', '')} · {duration}")
-                                        st.caption(sess.get("topic", "Learning").replace("_", " ").title())
+                                        duration = f"{sess.get('duration_mins', 0)} min" if sess.get("duration_mins") else "Duration TBD"
+                                        st.markdown(f"{icon} **{resource_title}**")
+                                        st.caption(f"{sess.get('start', 'Time TBD')} · {duration}")
                                         session_url = sess.get("resource_url")
                                         if isinstance(session_url, str) and session_url.startswith(("https://", "http://")):
-                                            st.link_button("Open resource", session_url, key=f"day_resource_{sess.get('id', uuid.uuid4().hex)}")
+                                            st.markdown(f"[Open resource]({session_url})")
                                         st.divider()
-                st.progress(completed_count / len(sessions) if sessions else 0.0,
-                            text=f"{completed_count} of {len(sessions)} learning sessions completed")
+                    st.progress(completed_count / len(sessions) if sessions else 0.0,
+                                text=f"{completed_count} of {len(sessions)} learning sessions completed")
 
         st.markdown("**Daily check-in**")
         pending_sessions = [s for s in pr["sessions"] if s.get("status", "scheduled") == "scheduled"]
