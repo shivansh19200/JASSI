@@ -253,27 +253,35 @@ def node_generate_tradeoffs(state: PlanningState) -> PlanningState:
 
 
 def node_schedule_explanation(state: PlanningState) -> PlanningState:
-    topics_data = feasibility_tool.merge_dynamic_topics(
-        feasibility_tool.load_topics(state["topics_path"]), state.get("dynamic_topics") or []
-    )
-    scheduled = state["schedule_result"].get("scheduled", [])
-    try:
-        state["schedule_explanation"] = llm_nodes.generate_schedule_explanation(
-            state["client"], scheduled, topics_data
+    """Create a short schedule overview locally without calling Groq.
+
+    The explanation is optional presentation text; the schedule itself is
+    already generated deterministically. Keeping this node local prevents
+    provider outages, payload limits, or API quota errors from blocking plans.
+    """
+    scheduled = state.get("schedule_result", {}).get("scheduled", []) or []
+    total_minutes = sum(max(0, int(item.get("duration_mins") or 0)) for item in scheduled)
+    hours = total_minutes / 60
+    topic_counts: Dict[str, int] = {}
+    for item in scheduled:
+        topic = str(item.get("topic") or "your selected topics").strip()[:80]
+        topic_counts[topic] = topic_counts.get(topic, 0) + 1
+
+    if topic_counts:
+        topic_summary = ", ".join(
+            f"{name} ({count} session{'s' if count != 1 else ''})"
+            for name, count in list(topic_counts.items())[:3]
         )
-    except Exception as exc:
-        # The schedule is deterministic and already built at this point. An
-        # optional narrative must never prevent the student from receiving it.
-        import logging
-        logging.warning("Groq schedule explanation failed; using fallback: %s", exc)
-        session_count = len(scheduled)
-        total_minutes = sum(int(item.get("duration_mins") or 0) for item in scheduled)
-        hours = total_minutes / 60
-        state["schedule_explanation"] = (
-            f"Your plan contains {session_count} study sessions, totalling "
-            f"{hours:.1f} hours. Sessions are arranged around your available "
-            "study time and the order of the selected topics."
+        if len(topic_counts) > 3:
+            topic_summary += ", and other topics"
+        explanation = (
+            f"Your plan contains {len(scheduled)} study sessions, totalling {hours:.1f} hours. "
+            f"It focuses on {topic_summary}, arranged across your available study time."
         )
+    else:
+        explanation = "Your timetable is ready. It is arranged around your available study time."
+
+    state["schedule_explanation"] = explanation
     return state
 
 
