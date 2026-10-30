@@ -44,53 +44,86 @@ jassi/
 └── .env.example
 ```
 
-## Setup (Windows CMD)
+## Setup (Windows PowerShell or CMD)
 
-1. **Install Python 3.12** if you don't have it, from python.org. It is important because some dependencies used in the project do not run for newer versions of python.
+1. Install **Python 3.12** from https://www.python.org/downloads/.
+2. Open a terminal in the repository root and create the environment **once**:
 
-2. **Create and activate a virtual environment:**
+   **Windows CMD**
    ```cmd
-   python -m venv venv
-   venv\Scripts\activate
-   py -3.12 -m venv venv
+   py -3.12 -m venv .venv
+   .venv\Scripts\activate.bat
    ```
 
-3. **Install dependencies:**
-   ```cmd
-   pip install -r requirements.txt
+   **Windows PowerShell**
+   ```powershell
+   py -3.12 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
    ```
 
-4. **Get a free Groq API key:**
-   - Go to https://console.groq.com/keys
-   - Sign up (free tier, no card required) and create an API key
-
-5. **Configure your `.env` file:**
+3. Install dependencies:
+   ```bash
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+   ```
+4. Create a Groq API key at https://console.groq.com/keys.
+5. Create your local `.env` file:
    ```cmd
    copy .env.example .env
    ```
-   Then open `.env` in a text editor and paste your key:
-   ```
+   Add your key to `.env`:
+   ```env
    GROQ_API_KEY=gsk_your_actual_key_here
    ```
-
-6. **Run the dashboard:**
-   ```cmd
-   streamlit run app\streamlit_app.py
+6. Start the dashboard:
+   ```bash
+   streamlit run app/streamlit_app.py
    ```
-   Your browser should open automatically at `http://localhost:8501`.
-
-7. **(Optional) Run the terminal demo instead:**
-   ```cmd
-   python demo_script.py
-   ```
-
-8. **(Optional) Run the unit tests:**
-   ```cmd
+7. Run tests:
+   ```bash
    python -m unittest discover -s tests -v
    ```
 
+**Never commit `.env` or a real API key to GitHub.** `.env` is for local development. For Streamlit Community Cloud, add `GROQ_API_KEY = "gsk_..."` in the app's **Settings → Secrets** panel. The app reads the same environment variable in both places.
+
 ### macOS / Linux
-Same steps, but activate the venv with `source venv/bin/activate` and use `cp .env.example .env`.
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env.example .env
+streamlit run app/streamlit_app.py
+```
+
+### Planning flow and student preferences
+
+JASSI now presents resource paths before making a feasibility claim. Choose a curated learning path, or add your own learning resources in the planning flow using one entry per line:
+
+```text
+Topic ID | Resource title | https://resource-url | estimated minutes
+```
+
+For example:
+
+```text
+graphs | Graph Algorithms playlist | https://www.youtube.com/playlist?list=YOUR_ID | 240
+```
+
+The URL and duration are user-provided; JASSI does not claim to crawl or verify course contents. Check the provider's current syllabus and duration before relying on it.
+
+Use **Study & routine preferences** in the sidebar to set your maximum study hours per day, wake/sleep times, meal-break start times, and recovery gap between sessions. JASSI uses these limits when estimating capacity and placing sessions. The feasibility check is run against the resources you actually select, not only a generic topic-hours estimate.
+
+## Deploy on Streamlit Community Cloud
+
+1. Push this repository to GitHub (keep `.env` out of the commit; `.gitignore` excludes it).
+2. In https://share.streamlit.io/, choose **New app**, select this repository and branch, and set the main file to `app/streamlit_app.py`.
+3. Open **Advanced settings → Secrets** and add:
+   ```toml
+   GROQ_API_KEY = "gsk_your_actual_key_here"
+   ```
+4. Deploy. `GroqClient` reads the key from Streamlit Secrets in the cloud and from `.env` locally.
 
 ## Semantic search note
 
@@ -122,7 +155,8 @@ both halves of the hybrid architecture working together.
 - Google Calendar import is stubbed with a normalizer function
   (`parse_google_calendar_events`) ready to receive fetched events — the OAuth
   redirect itself isn't wired up in this build.
-- The calendar model treats a week as repeating; multi-week deadlines are
-  approximated rather than modeled with real dates.
-- Drag-and-drop manual adjustment of the timetable is not yet implemented;
-  sessions can currently be changed only via the daily check-in flow.
+- Calendar commitments repeat by weekday; multi-week availability is therefore
+  an estimate rather than a fully imported date-specific calendar.
+- User-supplied resources are selected using the title, URL, and duration the
+  student enters. JASSI does not automatically crawl arbitrary course pages.
+- Drag-and-drop manual timetable editing is not implemented yet.

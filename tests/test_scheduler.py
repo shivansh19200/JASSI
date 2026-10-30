@@ -43,6 +43,28 @@ class TestScheduler(unittest.TestCase):
         self.assertIsNotNone(new_session)
         self.assertNotEqual(new_session["day"], "Monday")
 
+    def test_does_not_schedule_outside_waking_window(self):
+        result = scheduler.build_schedule_dated(
+            self.sessions_needed, self.calendar,
+            start_date=__import__("datetime").date(2026, 11, 2), deadline_days=7,
+            wake_start="09:00", sleep_start="18:00", max_daily_study_hours=2.0,
+        )
+        for session in result["scheduled"]:
+            self.assertGreaterEqual(int(session["start"][:2]), 9)
+            self.assertLessEqual(int(session["end"][:2]), 18)
+
+    def test_does_not_schedule_during_meal_breaks(self):
+        result = scheduler.build_schedule_dated(
+            [{"topic": "trees", "duration_mins": 60, "order": 0}], [],
+            start_date=__import__("datetime").date(2026, 11, 2), deadline_days=1,
+            wake_start="07:00", sleep_start="23:00", lunch_start="12:00",
+            dinner_start="19:00", meal_break_mins=60,
+        )
+        self.assertEqual(len(result["scheduled"]), 1)
+        session = result["scheduled"][0]
+        self.assertFalse(session["start"] < "13:00" and session["end"] > "12:00")
+        self.assertFalse(session["start"] < "20:00" and session["end"] > "19:00")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -70,34 +70,65 @@ def _time_to_minutes(t: str) -> int:
 
 
 def available_hours_in_window(calendar_events: List[Dict[str, Any]], deadline_days: int,
-                               allowed_days: Optional[List[str]] = None) -> float:
-    """Sum free hours across the deadline window, respecting hard AND soft
-    constraints as currently-occupied (soft constraints are only freed up
-    if the user explicitly chooses to move them during replanning).
-    allowed_days optionally restricts studying to the student's preferred
-    weekdays only (e.g. they said "just weekends")."""
-    days_needed = min(deadline_days, 7)  # calendar currently modeled as a repeating week
-    total_day_minutes = (DAY_END_HOUR - DAY_START_HOUR) * 60
-    free_minutes = 0
+                               allowed_days: Optional[List[str]] = None,
+                               max_daily_study_hours: float = 3.0,
+                               wake_start: str = "07:00", sleep_start: str = "23:00") -> float:
+    """Estimate sustainable study capacity, not every theoretically empty minute.
+
+    Existing hard/soft events are treated as occupied. Capacity is capped by the
+    student's daily study threshold and by their waking window. The 35% free-time
+    heuristic is retained as a conservative guardrail, but can never exceed the
+    explicit daily threshold.
+    """
+    import math
+    days_needed = min(deadline_days, 7)
     events_by_day: Dict[str, List[Dict[str, Any]]] = {}
     for ev in calendar_events:
-        events_by_day.setdefault(ev["day"], []).append(ev)
-
+        if ev.get("type") in ("hard", "soft"):
+            events_by_day.setdefault(ev["day"], []).append(ev)
     considered_days = DAY_ORDER[:days_needed] if deadline_days <= 7 else DAY_ORDER
     if allowed_days:
         considered_days = [d for d in considered_days if d in allowed_days]
-    weeks = max(1, -(-deadline_days // 7))  # ceil division for multi-week windows
-
+    weeks = max(1, math.ceil(deadline_days / 7))
+    wake = _time_to_minutes(wake_start)
+    sleep = _time_to_minutes(sleep_start)
+    if sleep <= wake:
+        sleep = DAY_END_HOUR * 60
+    sleep = min(sleep, DAY_END_HOUR * 60)
+    waking_minutes = max(0, sleep - wake)
+    daily_cap = max(0.0, float(max_daily_study_hours)) * 60
+    daily_capacity = []
     for day in considered_days:
-        occupied = 0
+        intervals = []
         for ev in events_by_day.get(day, []):
-            occupied += _time_to_minutes(ev["end"]) - _time_to_minutes(ev["start"])
-        free_minutes += max(0, total_day_minutes - occupied)
-
-    total_free_minutes = free_minutes * weeks if deadline_days > 7 else free_minutes
-    # cap realistic study time to ~35% of free time so we don't imply someone
-    # will study every waking free minute
-    return round((total_free_minutes * 0.35) / 60.0, 2)
+            a, b = _time_to_minutes(ev["start"]), _time_to_minutes(ev["end"])
+            a, b = max(a, wake), min(b, sleep)
+            if b > a:
+                intervals.append((a, b))
+        intervals.sort()
+        occupied = 0
+        merged = []
+        for a, b in intervals:
+            if not merged or a > merged[-1][1]:
+                merged.append([a, b])
+            else:
+                merged[-1][1] = max(merged[-1][1], b)
+        occupied = sum(b - a for a, b in merged)
+        free = max(0, waking_minutes - occupied)
+        # Meals and short recovery breaks are protected by the 35% factor.
+        sustainable = min(daily_cap, free * 0.35)
+        daily_capacity.append(sustainable)
+    if not daily_capacity:
+        return 0.0
+    if deadline_days <= 7:
+        return round(sum(daily_capacity) / 60.0, 2)
+    full_weeks, remainder = divmod(deadline_days, 7)
+    weekly = sum(daily_capacity) / 60.0
+    partial_days = DAY_ORDER[:remainder]
+    if allowed_days:
+        partial_days = [d for d in partial_days if d in allowed_days]
+    partial = sum(daily_capacity[considered_days.index(d)] for d in partial_days if d in considered_days) / 60.0
+    return round(full_weeks * weekly + partial, 2)
 
 
 def _day_commitment_blocks(calendar_events: List[Dict[str, Any]], day: str) -> List[tuple]:
@@ -165,9 +196,13 @@ def calculate_feasibility(topics: List[str], target_mastery: int, deadline_days:
                            current_mastery: Dict[str, int],
                            calendar_events: List[Dict[str, Any]],
                            topics_data: Dict[str, Any],
-                           allowed_days: Optional[List[str]] = None) -> Dict[str, Any]:
+                           allowed_days: Optional[List[str]] = None,
+                           max_daily_study_hours: float = 3.0,
+                           wake_start: str = "07:00", sleep_start: str = "23:00") -> Dict[str, Any]:
     required = required_hours_for_pr(topics, target_mastery, current_mastery, topics_data)
-    available = available_hours_in_window(calendar_events, deadline_days, allowed_days=allowed_days)
+    available = available_hours_in_window(calendar_events, deadline_days, allowed_days=allowed_days,
+                                          max_daily_study_hours=max_daily_study_hours,
+                                          wake_start=wake_start, sleep_start=sleep_start)
     shortfall = round(max(0.0, required - available), 2)
     feasible = shortfall <= 0.01
     risks = assess_schedule_risks(calendar_events, deadline_days, allowed_days=allowed_days)
@@ -184,6 +219,7 @@ def calculate_feasibility(topics: List[str], target_mastery: int, deadline_days:
         "feasible": feasible,
         "risks": risks,
         "reject": reject,
+        "daily_study_limit_hours": float(max_daily_study_hours),
     }
 
 

@@ -39,6 +39,17 @@ class TestFeasibility(unittest.TestCase):
         ext = feasibility.min_deadline_extension_days(5.0, avg_free_hours_per_day=1.0)
         self.assertEqual(ext, 5)
 
+    def test_daily_study_threshold_caps_available_hours(self):
+        low = feasibility.available_hours_in_window(self.calendar, 7, max_daily_study_hours=1.0)
+        high = feasibility.available_hours_in_window(self.calendar, 7, max_daily_study_hours=5.0)
+        self.assertLessEqual(low, 1.0 * 7)
+        self.assertLess(low, high)
+
+    def test_sleep_window_reduces_available_capacity(self):
+        early_sleep = feasibility.available_hours_in_window(self.calendar, 7, sleep_start="20:00")
+        late_sleep = feasibility.available_hours_in_window(self.calendar, 7, sleep_start="23:00")
+        self.assertLessEqual(early_sleep, late_sleep)
+
 
 if __name__ == "__main__":
     unittest.main()

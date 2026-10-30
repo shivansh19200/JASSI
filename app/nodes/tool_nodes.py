@@ -45,6 +45,12 @@ def node_calculate_feasibility(state: Dict[str, Any]) -> Dict[str, Any]:
         calendar_events=state["calendar_events"],
         topics_data=topics_data,
         allowed_days=state.get("preferred_days") or None,
+        max_daily_study_hours=(state.get("study_preferences") or {}).get("max_daily_study_hours", 3.0),
+        wake_start=(state.get("study_preferences") or {}).get("wake_start", "07:00"),
+        sleep_start=(state.get("study_preferences") or {}).get("sleep_start", "23:00"),
+        lunch_start=(state.get("study_preferences") or {}).get("lunch_start", "12:30"),
+        dinner_start=(state.get("study_preferences") or {}).get("dinner_start", "19:30"),
+        break_minutes=(state.get("study_preferences") or {}).get("break_minutes", 15),
     )
     state["feasibility_result"] = result
     return state
@@ -67,6 +73,9 @@ def node_build_schedule(state: Dict[str, Any]) -> Dict[str, Any]:
         existing_dated_sessions=state.get("existing_sessions", []),
         time_window=time_window,
         ignore_time_conflict=state.get("ignore_time_conflict", False),
+        max_daily_study_hours=(state.get("study_preferences") or {}).get("max_daily_study_hours", 3.0),
+        wake_start=(state.get("study_preferences") or {}).get("wake_start", "07:00"),
+        sleep_start=(state.get("study_preferences") or {}).get("sleep_start", "23:00"),
     )
     state["schedule_result"] = result
     return state

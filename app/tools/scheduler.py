@@ -58,10 +58,11 @@ def _build_busy_map(calendar_events: List[Dict[str, Any]], respect_soft: bool = 
     return busy
 
 
-def _find_free_slots(busy_intervals: List[tuple], duration_mins: int) -> List[tuple]:
+def _find_free_slots(busy_intervals: List[tuple], duration_mins: int,
+                     day_start: int = DAY_START_HOUR * 60,
+                     day_end: int = DAY_END_HOUR * 60) -> List[tuple]:
     slots = []
-    cursor = DAY_START_HOUR * 60
-    day_end = DAY_END_HOUR * 60
+    cursor = day_start
     intervals = sorted(busy_intervals)
     for start, end in intervals:
         if start - cursor >= duration_mins:
@@ -147,7 +148,12 @@ def build_schedule_dated(sessions_needed: List[Dict[str, Any]], calendar_events:
                           allowed_days: Optional[List[str]] = None,
                           existing_dated_sessions: Optional[List[Dict[str, Any]]] = None,
                           time_window: Optional[tuple] = None,
-                          ignore_time_conflict: bool = False) -> Dict[str, Any]:
+                          ignore_time_conflict: bool = False,
+                          max_daily_study_hours: float = 3.0,
+                          wake_start: str = "07:00",
+                          sleep_start: str = "23:00",
+                          lunch_start: str = "12:30", dinner_start: str = "19:30",
+                          meal_break_mins: int = 45, break_minutes: int = 15) -> Dict[str, Any]:
     """Date-aware scheduler: places sessions across the FULL deadline window
     (which may span several calendar weeks), not just a single generic
     Mon-Sun template. calendar_events (hard/soft) are still weekday-recurring
@@ -198,14 +204,38 @@ def build_schedule_dated(sessions_needed: List[Dict[str, Any]], calendar_events:
     scheduled = []
     unscheduled = []
 
+    wake_min = _time_to_minutes(wake_start)
+    sleep_min = _time_to_minutes(sleep_start)
+    # The timetable grid is bounded to the same calendar day (06:00–23:00).
+    # If a user enters an after-midnight bedtime, keep the scheduler inside
+    # that visible grid instead of emitting invalid times such as 25:00.
+    if sleep_min <= wake_min:
+        sleep_min = DAY_END_HOUR * 60
+    sleep_min = min(sleep_min, DAY_END_HOUR * 60)
+    daily_cap = max(0, int(float(max_daily_study_hours) * 60))
+    lunch_min = _time_to_minutes(lunch_start)
+    dinner_min = _time_to_minutes(dinner_start)
+    meal_blocks = [(lunch_min, lunch_min + int(meal_break_mins)),
+                   (dinner_min, dinner_min + int(meal_break_mins))]
     for item in sorted(sessions_needed, key=lambda x: x.get("order", 0)):
-        duration = item["duration_mins"]
+        duration = int(item["duration_mins"])
+        if duration > daily_cap:
+            unscheduled.append(item)
+            continue
         best = None  # (score, date_iso, weekday, start, end)
         for d, weekday in dates:
             date_iso = d.isoformat()
-            busy_today = list(weekday_busy.get(weekday, [])) + busy_by_date.get(date_iso, [])
+            study_blocks = busy_by_date.get(date_iso, [])
+            busy_today = list(weekday_busy.get(weekday, [])) + meal_blocks
+            # Add a recovery buffer around each study block already placed on
+            # this date so two sessions are never scheduled back-to-back.
+            busy_today += [(max(wake_min, a - break_minutes), min(sleep_min, b + break_minutes))
+                           for a, b in study_blocks]
             busy_today.sort()
-            for start, end in _find_free_slots(busy_today, duration):
+            remaining_daily = daily_cap - daily_load.get(date_iso, 0)
+            if remaining_daily < duration:
+                continue
+            for start, end in _find_free_slots(busy_today, duration, wake_min, sleep_min):
                 score = _score_slot(start, end, time_window, daily_load.get(date_iso, 0))
                 if best is None or score > best[0]:
                     best = (score, date_iso, weekday, start, end)
@@ -229,7 +259,8 @@ def build_schedule_dated(sessions_needed: List[Dict[str, Any]], calendar_events:
         busy_by_date.setdefault(date_iso, []).append((start, end))
         daily_load[date_iso] = daily_load.get(date_iso, 0) + duration
 
-    return {"scheduled": scheduled, "unscheduled": unscheduled, "time_conflict": time_conflict}
+    return {"scheduled": scheduled, "unscheduled": unscheduled, "time_conflict": time_conflict,
+            "daily_limit_hours": float(max_daily_study_hours)}
 
 
 def reschedule_single_dated(session: Dict[str, Any], calendar_events: List[Dict[str, Any]],

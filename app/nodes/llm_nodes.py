@@ -16,6 +16,15 @@ load_dotenv()
 class GroqClient:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or os.environ.get("GROQ_API_KEY")
+        # Streamlit Community Cloud stores credentials in st.secrets rather
+        # than exporting them as environment variables. Support both local
+        # .env development and cloud deployment without duplicating config.
+        if not self.api_key:
+            try:
+                import streamlit as st
+                self.api_key = st.secrets.get("GROQ_API_KEY")
+            except Exception:
+                self.api_key = None
         if self.api_key:
             self.api_key = self.api_key.strip().strip('"').strip("'")
         # llama-3.3-70b-versatile was decommissioned by Groq on 2026-08-16;
@@ -23,7 +32,8 @@ class GroqClient:
         self.model = model or os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
         if not self.api_key:
             raise RuntimeError(
-                "GROQ_API_KEY is not set. Add it to your .env file — see .env.example."
+                "JASSI can't find your Groq API key. For local use, add GROQ_API_KEY to .env; "
+                "on Streamlit Cloud, add it under App settings → Secrets. See the README."
             )
         from groq import Groq
         self._client = Groq(api_key=self.api_key)

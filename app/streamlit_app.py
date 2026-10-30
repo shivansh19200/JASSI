@@ -386,6 +386,10 @@ def save_student(data):
 
 if "student" not in st.session_state:
     st.session_state.student = load_student()
+st.session_state.student.setdefault("study_preferences", {
+    "max_daily_study_hours": 3.0, "wake_start": "07:00", "sleep_start": "23:00",
+    "lunch_start": "12:30", "dinner_start": "19:30", "break_minutes": 15,
+})
 if "selected_pr" not in st.session_state:
     st.session_state.selected_pr = None
 if "reasoning_log" not in st.session_state:
@@ -703,6 +707,8 @@ def create_planning_request_flow(nl_input: str):
         "retriever": st.session_state.retriever,
         "existing_sessions": [],
         "moved_soft_event_ids": [],
+        "study_preferences": dict(student.get("study_preferences", {})),
+        "reference_resources": [],
     }
     render_status(status_slot, "🧭", "Understanding your goal...")
     state = node_parse_pr(state)
@@ -745,34 +751,14 @@ def _continue_planning_after_days(state: dict):
             st.rerun()
             return
 
-    render_status(status_slot, "🧮", "Crunching the numbers...")
-    state = tn.node_calculate_feasibility(state)
-    render_status(status_slot, "💬", "Writing you an explanation...")
-    state = node_feasibility_explanation(state)
-
-    if state["feasibility_result"]["feasible"]:
-        render_status(status_slot, "🔎", "Putting together resource options...")
-        state = node_generate_resource_paths(state)
-        status_slot.empty()
-        log_reasoning(state["feasibility_explanation"])
-        risks = state["feasibility_result"].get("risks") or []
-        if risks:
-            # The hours add up on paper, but the existing commitment load
-            # still has real friction (a meal window fully blocked, a
-            # stacked back-to-back day) — surface it instead of silently
-            # proceeding as if the plan were frictionless.
-            st.toast("Heads up — some days are tight even though the hours work out.", icon="⚠️")
-            for r in risks:
-                log_reasoning(f"⚠️ {r}")
-        st.session_state.pending_resource_choice = {
-            "pr_id": f"pr_{uuid.uuid4().hex[:6]}", "state": state, "chosen": {},
-        }
-    else:
-        render_status(status_slot, "⚖️", "Weighing your options...")
-        state = node_generate_tradeoffs(state)
-        status_slot.empty()
-        log_reasoning(state["feasibility_explanation"])
-        st.session_state.pending_tradeoffs = {"pr_id": f"pr_{uuid.uuid4().hex[:6]}", "result": state}
+    # Show resource choices BEFORE claiming the plan is feasible. The real
+    # workload is evaluated after the student chooses a path.
+    render_status(status_slot, "🔎", "Finding learning resources and building study paths...")
+    state = node_generate_resource_paths(state)
+    status_slot.empty()
+    st.session_state.pending_resource_choice = {
+        "pr_id": f"pr_{uuid.uuid4().hex[:6]}", "state": state, "chosen": {},
+    }
     st.rerun()
 
 
@@ -781,6 +767,32 @@ def finalize_plan_from_paths(pr_id: str, state: dict, chosen_paths: dict):
     student picked, verify it, and save the new planning request."""
     state["sessions_needed"] = build_sessions_from_chosen_paths_safe(chosen_paths, state)
     state["start_date"] = date.today()
+    prefs = state.get("study_preferences") or {}
+    required = round(sum(s.get("duration_mins", 30) for s in state["sessions_needed"]) / 60.0, 2)
+    available = feasibility_tool.available_hours_in_window(
+        state["calendar_events"], state["pr_deadline_days"],
+        allowed_days=state.get("preferred_days") or None,
+        max_daily_study_hours=prefs.get("max_daily_study_hours", 3.0),
+        wake_start=prefs.get("wake_start", "07:00"), sleep_start=prefs.get("sleep_start", "23:00"))
+    shortfall = round(max(0.0, required - available), 2)
+    state["feasibility_result"] = {
+        "required_hours": required, "available_hours": available,
+        "shortfall_hours": shortfall, "feasible": shortfall <= 0.01,
+        "reject": shortfall > 0 and (available <= 0.01 or shortfall > available * 2),
+        "risks": feasibility_tool.assess_schedule_risks(state["calendar_events"], state["pr_deadline_days"], state.get("preferred_days") or None),
+        "daily_study_limit_hours": prefs.get("max_daily_study_hours", 3.0),
+    }
+    if not state["feasibility_result"]["feasible"]:
+        from app.graph import node_generate_tradeoffs
+        state["feasibility_explanation"] = (
+            f"The resources you selected need about {required:g} study hours, but your current routine "
+            f"comfortably allows about {available:g} hours before the deadline. "
+            f"That leaves a gap of {shortfall:g} hours. We should adjust the deadline, workload, or commitments before scheduling."
+        )
+        state = node_generate_tradeoffs(state)
+        st.session_state.pending_tradeoffs = {"pr_id": pr_id, "result": state}
+        st.rerun()
+        return
     _build_schedule_and_continue(pr_id, state)
 
 
@@ -820,6 +832,17 @@ def _build_schedule_and_continue(pr_id: str, state: dict):
     status_slot.empty()
 
     sessions = state["schedule_result"]["scheduled"]
+    unscheduled = state["schedule_result"].get("unscheduled", [])
+    if unscheduled or not state.get("verification_result", {}).get("passed", False):
+        details = []
+        if unscheduled:
+            details.append(f"{len(unscheduled)} selected study session(s) could not fit within your daily limit and available time.")
+        if state.get("verification_result", {}).get("user_messages"):
+            details.extend(state["verification_result"]["user_messages"])
+        friendly = "I couldn't fit the whole plan safely. " + " ".join(details) + " Try extending the deadline, choosing a shorter resource path, or allowing another study day."
+        st.error(friendly)
+        log_reasoning(friendly)
+        return
     for s in sessions:
         student["calendar_events"].append({
             "id": s["id"], "title": f"{s['topic'].title()} · {s['resource_title']}",
@@ -841,6 +864,7 @@ def _build_schedule_and_continue(pr_id: str, state: dict):
         "preferred_days": state.get("preferred_days") or [],
         "dynamic_topics": dynamic_topics,
         "sessions": sessions, "daily_updates": [], "replan_count": state.get("_replan_count", 0),
+        "study_preferences": state.get("study_preferences", {}),
         "quiz_history": [],
     }
     student["planning_requests"].append(new_pr)
@@ -878,6 +902,26 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     st.write("")
+
+    with st.expander("⚙️ Study & routine preferences", expanded=False):
+        prefs = student.setdefault("study_preferences", {
+            "max_daily_study_hours": 3.0, "wake_start": "07:00", "sleep_start": "23:00",
+            "lunch_start": "12:30", "dinner_start": "19:30", "break_minutes": 15,
+        })
+        max_hours = st.slider("Maximum study hours per day", 1.0, 8.0,
+                              float(prefs.get("max_daily_study_hours", 3.0)), 0.5)
+        wake_time = st.time_input("Usual wake-up time", value=datetime.strptime(prefs.get("wake_start", "07:00"), "%H:%M").time())
+        sleep_time = st.time_input("Usual sleep time", value=datetime.strptime(prefs.get("sleep_start", "23:00"), "%H:%M").time())
+        lunch_time = st.time_input("Lunch break starts", value=datetime.strptime(prefs.get("lunch_start", "12:30"), "%H:%M").time())
+        dinner_time = st.time_input("Dinner break starts", value=datetime.strptime(prefs.get("dinner_start", "19:30"), "%H:%M").time())
+        break_mins = st.selectbox("Break between study sessions", [5, 10, 15, 20, 30],
+                                  index=[5, 10, 15, 20, 30].index(int(prefs.get("break_minutes", 15))))
+        if st.button("Save routine", use_container_width=True):
+            prefs.update({"max_daily_study_hours": max_hours, "wake_start": wake_time.strftime("%H:%M"),
+                          "sleep_start": sleep_time.strftime("%H:%M"), "lunch_start": lunch_time.strftime("%H:%M"),
+                          "dinner_start": dinner_time.strftime("%H:%M"), "break_minutes": break_mins})
+            save_student(student)
+            st.success("Your routine preferences have been saved.")
 
     st.markdown("**Your plans**")
     if not prs:
@@ -952,10 +996,22 @@ elif st.session_state.pending_time_prefs:
         "Evening (17–22)": (17 * 60, 22 * 60),
         "No preference": (None, None),
     }
+    st.caption("Optional: add your own course or playlist. One per line: Topic ID | title | URL | estimated minutes. Use 'all' as the topic for a resource that covers everything.")
+    user_refs_text = st.text_area("Your YouTube / Coursera / other resources", placeholder="graphs | Graph Algorithms playlist | https://youtube.com/playlist?list=... | 240", key="planning_user_resources")
     if st.button("Confirm timing", type="primary", use_container_width=True):
         state = tp["state"]
         start_min, end_min = time_ranges[time_choice]
         state["preferred_time_start"], state["preferred_time_end"] = start_min, end_min
+        refs = []
+        for line in user_refs_text.splitlines():
+            parts = [part.strip() for part in line.split("|")]
+            if len(parts) == 4 and parts[1] and parts[2].startswith(("https://", "http://")):
+                try:
+                    minutes = max(15, int(parts[3]))
+                    refs.append({"topic": parts[0] or "all", "title": parts[1], "url": parts[2], "duration_mins": minutes})
+                except ValueError:
+                    continue
+        state["reference_resources"] = refs
         st.session_state.pending_time_prefs = None
         _continue_planning_after_days(state)
 
@@ -1055,8 +1111,8 @@ elif st.session_state.pending_resource_choice:
     <div class="card">
       <div style="font-weight:700;font-size:15px;margin-bottom:4px;">🧭 Pick your path</div>
       <div style="color:var(--text-2);font-size:13px;">
-        For each topic, choose the playlist that fits how you like to learn — JASSI builds
-        the schedule from whichever one you pick.
+        Compare the learning paths and choose one for each topic. JASSI checks the actual
+        time needed against your work, sleep, meals, breaks and daily study limit after you choose.
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1075,6 +1131,7 @@ elif st.session_state.pending_resource_choice:
                     pros = "".join(f"<li>{p}</li>" for p in path.get("pros", []))
                     cons = "".join(f"<li>{c}</li>" for c in path.get("cons", []))
                     total_mins = sum(s.get("duration_mins", 0) for s in path.get("sessions", []))
+                    resource_links = "".join(f'<li><a href="{s["resource_url"]}" target="_blank" rel="noopener">{s["title"]}</a></li>' for s in path.get("sessions", []) if s.get("resource_url", "").startswith(("https://", "http://")))
                     st.markdown(f"""
                     <div class="path-card">
                       <b>{path['title']}</b>
@@ -1083,6 +1140,7 @@ elif st.session_state.pending_resource_choice:
                       </div>
                       <div class="path-pros-cons"><b>Pros</b><ul>{pros}</ul></div>
                       <div class="path-pros-cons"><b>Cons</b><ul>{cons}</ul></div>
+                      {('<div class="path-pros-cons"><b>Your links</b><ul>'+resource_links+'</ul></div>') if resource_links else ''}
                     </div>
                     """, unsafe_allow_html=True)
                     if st.button(f"Choose “{path['title']}”", key=f"path_{topic}_{i}", use_container_width=True):

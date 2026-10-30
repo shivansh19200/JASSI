@@ -73,4 +73,14 @@ def verify_plan(sessions: List[Dict[str, Any]], calendar_events: List[Dict[str, 
     #  here we simply confirm every session was placed.)
 
     passed = len(issues) == 0
-    return {"passed": passed, "issues": issues}
+    friendly = []
+    for issue in issues:
+        if "conflicts with hard constraint" in issue:
+            friendly.append("A study session overlaps with a fixed commitment. Move the session to another free time.")
+        elif "overlaps with session" in issue:
+            friendly.append("Two study sessions were placed at the same time. Choose a different time for one of them.")
+        elif "Prerequisite violation" in issue:
+            friendly.append("A later topic was scheduled before its foundation. Study the prerequisite first.")
+        else:
+            friendly.append("One part of the timetable needs adjusting before this plan is ready.")
+    return {"passed": passed, "issues": issues, "user_messages": list(dict.fromkeys(friendly))}

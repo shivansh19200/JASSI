@@ -45,6 +45,8 @@ class PlanningState(TypedDict, total=False):
     dynamic_topics: List[Dict[str, Any]]
     resource_path_options: List[Dict[str, Any]]
     start_date: Any
+    study_preferences: Dict[str, Any]
+    reference_resources: List[Dict[str, Any]]
 
 
 def node_parse_pr(state: PlanningState) -> PlanningState:
@@ -132,7 +134,7 @@ def node_generate_resource_paths(state: PlanningState) -> PlanningState:
 
     ordered_topics = sorted(state["pr_topics"], key=lambda t: _prereq_depth(t, lookup))
     topic_choices = []
-    for topic in ordered_topics:
+    for topic_index, topic in enumerate(ordered_topics):
         info = lookup.get(topic, {})
         is_dynamic = info.get("dynamic", False)
         candidate_resources = None
@@ -142,14 +144,46 @@ def node_generate_resource_paths(state: PlanningState) -> PlanningState:
             candidate_resources = [
                 {"id": r["id"], "title": r["title"], "duration_mins": r["duration_mins"],
                  "difficulty": r["difficulty"]} for r in candidates
-            ] or None
+            ]
+        supplied = state.get("reference_resources") or []
+        matching_refs = [r for r in supplied if (
+            r.get("topic", "all").lower() in (topic.lower(), info.get("name", topic).lower())
+            or (r.get("topic", "all").lower() == "all" and topic_index == 0)
+        )]
+        for ref_index, ref in enumerate(matching_refs):
+            candidate_resources = candidate_resources or []
+            candidate_resources.append({"id": f"user_resource_{topic}_{ref_index}",
+                                        "title": ref["title"], "duration_mins": ref["duration_mins"],
+                                        "difficulty": "user-provided", "url": ref["url"]})
         result = llm_nodes.suggest_resource_paths(
             state["client"], info.get("name", topic),
             subtopics=info.get("subtopics"), candidate_resources=candidate_resources,
         )
+        paths = result.get("paths", [])
+        resource_by_id = {r["id"]: r for r in (candidate_resources or [])}
+        for path in paths:
+            for session in path.get("sessions", []):
+                resource = resource_by_id.get(session.get("resource_id"))
+                if resource and resource.get("url"):
+                    session["resource_url"] = resource["url"]
+        if not paths and candidate_resources:
+            # Keep the app usable if the model returns malformed/empty JSON.
+            ordered = sorted(candidate_resources, key=lambda r: r.get("duration_mins", 30))
+            paths = [
+                {"title": "Quick overview", "pros": ["Shortest route"], "cons": ["Less practice"],
+                 "sessions": [{"title": r["title"], "duration_mins": r["duration_mins"], "resource_id": r["id"]} for r in ordered[:2]]},
+                {"title": "Balanced learning", "pros": ["Mixes explanation and practice"], "cons": ["Takes longer"],
+                 "sessions": [{"title": r["title"], "duration_mins": r["duration_mins"], "resource_id": r["id"]} for r in ordered[:4]]},
+                {"title": "Deep practice", "pros": ["More time to apply concepts"], "cons": ["Highest time commitment"],
+                 "sessions": [{"title": r["title"], "duration_mins": r["duration_mins"], "resource_id": r["id"]} for r in ordered]},
+            ]
+        elif not paths:
+            subtopics = info.get("subtopics") or [info.get("name", topic) + " foundations", "guided practice", "review and assessment"]
+            paths = [{"title": "Guided learning", "pros": ["Clear progression"], "cons": ["AI-generated outline; review before starting"],
+                      "sessions": [{"title": str(label), "duration_mins": 45, "resource_id": None} for label in subtopics[:4]]}]
         topic_choices.append({
             "topic": topic, "topic_name": info.get("name", topic),
-            "dynamic": is_dynamic, "paths": result.get("paths", []),
+            "dynamic": is_dynamic, "paths": paths,
         })
     state["resource_path_options"] = topic_choices
     return state
@@ -166,6 +200,7 @@ def build_sessions_from_chosen_paths(chosen_paths: Dict[str, Dict[str, Any]]) ->
                 "topic": topic,
                 "resource_id": sess.get("resource_id"),
                 "resource_title": sess.get("title", f"{topic} session"),
+                "resource_url": sess.get("resource_url"),
                 "duration_mins": int(sess.get("duration_mins") or 30),
                 "order": order,
             })
