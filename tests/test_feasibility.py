@@ -1,6 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unittest
+from datetime import date
 from app.tools import feasibility
 
 
@@ -50,6 +51,26 @@ class TestFeasibility(unittest.TestCase):
         late_sleep = feasibility.available_hours_in_window(self.calendar, 7, sleep_start="23:00")
         self.assertLessEqual(early_sleep, late_sleep)
 
+
+    def test_no_preference_with_missing_deadline_does_not_mean_zero_capacity(self):
+        hours = feasibility.available_hours_in_window(
+            [], 0, allowed_days=None, max_daily_study_hours=3.0,
+            start_date=date(2026, 10, 31),
+        )
+        self.assertGreater(hours, 0.0)
+
+    def test_short_deadline_uses_actual_weekday_not_monday(self):
+        # Saturday is free, while Monday is fully occupied. A one-day window
+        # beginning Saturday must count Saturday's capacity.
+        calendar = [
+            {"id": "busy-mon", "title": "All-day commitment", "day": "Monday",
+             "start": "07:00", "end": "23:00", "type": "hard"}
+        ]
+        hours = feasibility.available_hours_in_window(
+            calendar, 1, allowed_days=None, max_daily_study_hours=3.0,
+            start_date=date(2026, 10, 31),
+        )
+        self.assertGreater(hours, 0.0)
 
 if __name__ == "__main__":
     unittest.main()

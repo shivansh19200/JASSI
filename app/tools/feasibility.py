@@ -1,7 +1,7 @@
 """Deterministic feasibility math: required hours vs available hours."""
 from __future__ import annotations
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Any, Optional
 
 DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -72,24 +72,30 @@ def _time_to_minutes(t: str) -> int:
 def available_hours_in_window(calendar_events: List[Dict[str, Any]], deadline_days: int,
                                allowed_days: Optional[List[str]] = None,
                                max_daily_study_hours: float = 3.0,
-                               wake_start: str = "07:00", sleep_start: str = "23:00") -> float:
-    """Estimate sustainable study capacity, not every theoretically empty minute.
+                               wake_start: str = "07:00", sleep_start: str = "23:00",
+                               start_date: Optional[date] = None) -> float:
+    """Estimate sustainable study capacity across the actual deadline window.
 
-    Existing hard/soft events are treated as occupied. Capacity is capped by the
-    student's daily study threshold and by their waking window. The 35% free-time
-    heuristic is retained as a conservative guardrail, but can never exceed the
-    explicit daily threshold.
+    A missing/invalid deadline is normalized to a safe default rather than
+    silently becoming a zero-day window. Weekdays are derived from start_date
+    (today by default), not from Monday, so short deadlines use the correct
+    calendar days. Existing hard/soft events are occupied; the daily study cap
+    and a conservative recovery buffer keep the estimate sustainable.
     """
-    import math
-    days_needed = min(deadline_days, 7)
+    from datetime import timedelta as _timedelta
+
+    try:
+        days = int(deadline_days)
+    except (TypeError, ValueError):
+        days = 14
+    days = max(1, min(days, 365))
+    first_day = start_date or date.today()
+    allowed = set(allowed_days or DAY_ORDER)
     events_by_day: Dict[str, List[Dict[str, Any]]] = {}
     for ev in calendar_events:
         if ev.get("type") in ("hard", "soft"):
             events_by_day.setdefault(ev["day"], []).append(ev)
-    considered_days = DAY_ORDER[:days_needed] if deadline_days <= 7 else DAY_ORDER
-    if allowed_days:
-        considered_days = [d for d in considered_days if d in allowed_days]
-    weeks = max(1, math.ceil(deadline_days / 7))
+
     wake = _time_to_minutes(wake_start)
     sleep = _time_to_minutes(sleep_start)
     if sleep <= wake:
@@ -97,16 +103,19 @@ def available_hours_in_window(calendar_events: List[Dict[str, Any]], deadline_da
     sleep = min(sleep, DAY_END_HOUR * 60)
     waking_minutes = max(0, sleep - wake)
     daily_cap = max(0.0, float(max_daily_study_hours)) * 60
-    daily_capacity = []
-    for day in considered_days:
+    total_capacity = 0.0
+
+    for offset in range(days):
+        day_name = (first_day + _timedelta(days=offset)).strftime("%A")
+        if day_name not in allowed:
+            continue
         intervals = []
-        for ev in events_by_day.get(day, []):
+        for ev in events_by_day.get(day_name, []):
             a, b = _time_to_minutes(ev["start"]), _time_to_minutes(ev["end"])
             a, b = max(a, wake), min(b, sleep)
             if b > a:
                 intervals.append((a, b))
         intervals.sort()
-        occupied = 0
         merged = []
         for a, b in intervals:
             if not merged or a > merged[-1][1]:
@@ -115,20 +124,11 @@ def available_hours_in_window(calendar_events: List[Dict[str, Any]], deadline_da
                 merged[-1][1] = max(merged[-1][1], b)
         occupied = sum(b - a for a, b in merged)
         free = max(0, waking_minutes - occupied)
-        # Meals and short recovery breaks are protected by the 35% factor.
-        sustainable = min(daily_cap, free * 0.35)
-        daily_capacity.append(sustainable)
-    if not daily_capacity:
-        return 0.0
-    if deadline_days <= 7:
-        return round(sum(daily_capacity) / 60.0, 2)
-    full_weeks, remainder = divmod(deadline_days, 7)
-    weekly = sum(daily_capacity) / 60.0
-    partial_days = DAY_ORDER[:remainder]
-    if allowed_days:
-        partial_days = [d for d in partial_days if d in allowed_days]
-    partial = sum(daily_capacity[considered_days.index(d)] for d in partial_days if d in considered_days) / 60.0
-    return round(full_weeks * weekly + partial, 2)
+        # Reserve time for meals, transitions and recovery; never exceed the
+        # student's explicit daily study-hour threshold.
+        total_capacity += min(daily_cap, free * 0.35)
+
+    return round(total_capacity / 60.0, 2)
 
 
 def _day_commitment_blocks(calendar_events: List[Dict[str, Any]], day: str) -> List[tuple]:
@@ -144,7 +144,8 @@ def _day_commitment_blocks(calendar_events: List[Dict[str, Any]], day: str) -> L
 
 
 def assess_schedule_risks(calendar_events: List[Dict[str, Any]], deadline_days: int,
-                           allowed_days: Optional[List[str]] = None) -> List[str]:
+                           allowed_days: Optional[List[str]] = None,
+                           start_date: Optional[date] = None) -> List[str]:
     """Deterministic, concrete risk flags about the commitments the student
     ALREADY has — independent of (and a complement to) the required-vs-
     available hours math. This is what actually explains, in plain terms,
@@ -153,10 +154,17 @@ def assess_schedule_risks(calendar_events: List[Dict[str, Any]], deadline_days: 
     already nearly full before studying is even added. Deterministic on
     purpose, so the message is the same logic every time rather than
     whatever an LLM happens to phrase."""
-    days_needed = min(deadline_days, 7) if deadline_days <= 7 else 7
-    considered_days = DAY_ORDER[:days_needed]
-    if allowed_days:
-        considered_days = [d for d in considered_days if d in allowed_days]
+    try:
+        days = max(1, min(int(deadline_days), 365))
+    except (TypeError, ValueError):
+        days = 14
+    first_day = start_date or date.today()
+    allowed = set(allowed_days or DAY_ORDER)
+    considered_days = []
+    for offset in range(days):
+        day_name = (first_day + timedelta(days=offset)).strftime("%A")
+        if day_name in allowed and day_name not in considered_days:
+            considered_days.append(day_name)
 
     risks: List[str] = []
     for day in considered_days:
@@ -198,14 +206,17 @@ def calculate_feasibility(topics: List[str], target_mastery: int, deadline_days:
                            topics_data: Dict[str, Any],
                            allowed_days: Optional[List[str]] = None,
                            max_daily_study_hours: float = 3.0,
-                           wake_start: str = "07:00", sleep_start: str = "23:00") -> Dict[str, Any]:
+                           wake_start: str = "07:00", sleep_start: str = "23:00",
+                           start_date: Optional[date] = None) -> Dict[str, Any]:
     required = required_hours_for_pr(topics, target_mastery, current_mastery, topics_data)
     available = available_hours_in_window(calendar_events, deadline_days, allowed_days=allowed_days,
                                           max_daily_study_hours=max_daily_study_hours,
-                                          wake_start=wake_start, sleep_start=sleep_start)
+                                          wake_start=wake_start, sleep_start=sleep_start,
+                                          start_date=start_date)
     shortfall = round(max(0.0, required - available), 2)
     feasible = shortfall <= 0.01
-    risks = assess_schedule_risks(calendar_events, deadline_days, allowed_days=allowed_days)
+    risks = assess_schedule_risks(calendar_events, deadline_days, allowed_days=allowed_days,
+                                  start_date=start_date)
     # Not just "infeasible" but so far off that presenting the usual 3
     # tradeoffs (move a few soft events / nudge the deadline / drop one
     # topic) would be misleading — none of them get you close on their own.

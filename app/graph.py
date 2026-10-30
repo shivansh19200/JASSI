@@ -53,7 +53,13 @@ def node_parse_pr(state: PlanningState) -> PlanningState:
     parsed = llm_nodes.parse_planning_request(state["client"], state["raw_text"], state["known_topic_ids"])
     state["pr_topics"] = [t for t in parsed.get("topics", []) if t in state["known_topic_ids"]]
     state["pr_target_mastery"] = int(parsed.get("target_mastery", 70))
-    state["pr_deadline_days"] = int(parsed.get("deadline_days", 7))
+    # The LLM can occasionally emit 0 when the student did not specify a
+    # deadline. Treat that as unspecified, not as a zero-day planning window.
+    try:
+        parsed_deadline = int(parsed.get("deadline_days", 14))
+    except (TypeError, ValueError):
+        parsed_deadline = 14
+    state["pr_deadline_days"] = max(1, min(parsed_deadline, 365)) if parsed_deadline > 0 else 14
     state["is_learning_request"] = bool(parsed.get("is_learning_request", True))
     state["preferred_days"] = [d for d in parsed.get("preferred_days", []) if d]
     # The model may still occasionally return an id outside the known list (or nothing at all).

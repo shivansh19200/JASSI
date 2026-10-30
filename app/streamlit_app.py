@@ -773,13 +773,16 @@ def finalize_plan_from_paths(pr_id: str, state: dict, chosen_paths: dict):
         state["calendar_events"], state["pr_deadline_days"],
         allowed_days=state.get("preferred_days") or None,
         max_daily_study_hours=prefs.get("max_daily_study_hours", 3.0),
-        wake_start=prefs.get("wake_start", "07:00"), sleep_start=prefs.get("sleep_start", "23:00"))
+        wake_start=prefs.get("wake_start", "07:00"), sleep_start=prefs.get("sleep_start", "23:00"),
+        start_date=date.today())
     shortfall = round(max(0.0, required - available), 2)
     state["feasibility_result"] = {
         "required_hours": required, "available_hours": available,
         "shortfall_hours": shortfall, "feasible": shortfall <= 0.01,
         "reject": shortfall > 0 and (available <= 0.01 or shortfall > available * 2),
-        "risks": feasibility_tool.assess_schedule_risks(state["calendar_events"], state["pr_deadline_days"], state.get("preferred_days") or None),
+        "risks": feasibility_tool.assess_schedule_risks(
+            state["calendar_events"], state["pr_deadline_days"],
+            state.get("preferred_days") or None, start_date=date.today()),
         "daily_study_limit_hours": prefs.get("max_daily_study_hours", 3.0),
     }
     if not state["feasibility_result"]["feasible"]:
