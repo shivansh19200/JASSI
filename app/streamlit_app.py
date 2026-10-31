@@ -14,11 +14,13 @@ load_dotenv()
 
 from app.nodes.llm_nodes import GroqClient
 from app.tools import feasibility as feasibility_tool
-from app.tools.constraint_parser import manual_event, parse_image_with_llm, resolve_event_time_conflict
+from app.tools.constraint_parser import (
+    manual_event, parse_image_with_llm, resolve_event_time_conflict,
+    find_timetable_conflicts, merge_timetable_import,
+)
 from app.tools.resource_lookup import resolve_resource_url
 from app.vectorstore.resource_retriever import ResourceRetriever
 from app.graph import build_planning_request_graph, build_daily_update_graph
-from app.tools.schedule_recovery import reconcile_overdue_sessions
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 TOPICS_PATH = os.path.join(DATA_DIR, "topics.json")
@@ -414,17 +416,6 @@ st.session_state.student.setdefault("study_preferences", {
     "max_daily_study_hours": 3.0, "wake_start": "07:00", "sleep_start": "23:00",
     "lunch_start": "12:30", "dinner_start": "19:30", "break_minutes": 15,
 })
-# Reconcile dated study sessions on every app entry/rerun. The recovery
-# function is idempotent, so a refresh cannot create duplicate replacement tasks.
-_recovery_changes = reconcile_overdue_sessions(st.session_state.student)
-if _recovery_changes:
-    save_student(st.session_state.student)
-    _recovered = sum(1 for item in _recovery_changes if item.get("replacement"))
-    _unplaced = len(_recovery_changes) - _recovered
-    if _recovered:
-        st.toast(f"JASSI recovered {_recovered} overdue session(s) and updated your learning plan.", icon="🗓️")
-    if _unplaced:
-        st.warning(f"{_unplaced} overdue session(s) could not be placed automatically. Your plan keeps them marked as missed for review.")
 if "selected_pr" not in st.session_state:
     st.session_state.selected_pr = None
 if "roadmap_open" not in st.session_state:
@@ -700,6 +691,7 @@ UPDATE_STEP_LABELS = {
 }
 
 
+@_single_flight_action
 def stream_graph_with_status(graph, initial_state: dict, step_labels: dict, slot) -> dict:
     """Streams a compiled LangGraph graph node-by-node, updating `slot` with a
     centered spinning status ('..retrieving', '..working on it', etc.)
@@ -743,7 +735,7 @@ def create_planning_request_flow(nl_input: str):
     day-of-week preference (if the student didn't already state one) before
     doing anything else — so scheduling starts from an accurate picture of
     when they're actually willing to study."""
-    from app.graph import build_planning_intake_graph
+    from app.graph import node_parse_pr
     client = get_client()
     student = st.session_state.student
     state = {
@@ -759,12 +751,9 @@ def create_planning_request_flow(nl_input: str):
         "study_preferences": dict(student.get("study_preferences", {})),
         "reference_resources": [],
     }
-    intake_graph = build_planning_intake_graph()
-    state = stream_graph_with_status(
-        intake_graph, state,
-        {"parse_planning_request": ("🧭", "Understanding your goal...")},
-        status_slot,
-    )
+    render_status(status_slot, "🧭", "Understanding your goal...")
+    state = node_parse_pr(state)
+    status_slot.empty()
 
     if state.get("preferred_days"):
         _ask_time_prefs(state)
@@ -787,26 +776,27 @@ def _continue_planning_after_days(state: dict):
     the LLM to synthesize a fresh one if it's a genuine but out-of-catalog
     learning goal), check feasibility, and either offer resource-path choices
     or a trade-off (reality check) if it isn't feasible as asked."""
-    from app.graph import build_planning_resource_graph
+    from app.graph import node_synthesize_topic, node_feasibility_explanation, \
+        node_generate_tradeoffs, node_generate_resource_paths
+    from app.nodes import tool_nodes as tn
 
-    # The graph owns topic synthesis/routing and resource-path generation.
-    # Streamlit pauses after this graph so the student can choose a path.
-    resource_graph = build_planning_resource_graph()
-    state = stream_graph_with_status(
-        resource_graph, state,
-        {
-            "synthesize_topic": ("🧪", "Checking the topic and designing it if needed..."),
-            "generate_resource_paths": ("🔎", "Finding learning resources and building study paths..."),
-            "no_topic_match": ("🤔", "Checking whether this is a learning goal..."),
-        },
-        status_slot,
-    )
     if not state.get("pr_topics"):
-        msg = state.get("unmatched_reason") or "That doesn't look like a learning goal JASSI can plan for."
-        st.toast(msg, icon="🤔")
-        log_reasoning(msg)
-        st.rerun()
-        return
+        if state.get("is_learning_request", True):
+            render_status(status_slot, "🧪", "Not in our catalog — designing fresh material for it...")
+            state = node_synthesize_topic(state)
+        if not state.get("pr_topics"):
+            status_slot.empty()
+            msg = state.get("unmatched_reason") or "That doesn't look like a learning goal JASSI can plan for."
+            st.toast(msg, icon="🤔")
+            log_reasoning(msg)
+            st.rerun()
+            return
+
+    # Show resource choices BEFORE claiming the plan is feasible. The real
+    # workload is evaluated after the student chooses a path.
+    render_status(status_slot, "🔎", "Finding learning resources and building study paths...")
+    state = node_generate_resource_paths(state)
+    status_slot.empty()
     st.session_state.pending_resource_choice = {
         "pr_id": f"pr_{uuid.uuid4().hex[:6]}", "state": state, "chosen": {},
     }
@@ -917,8 +907,6 @@ def _build_schedule_and_continue(pr_id: str, state: dict):
         "required_hours": state["feasibility_result"]["required_hours"],
         "scheduled_hours": sum(s["duration_mins"] for s in sessions) / 60,
         "preferred_days": state.get("preferred_days") or [],
-        "preferred_time_start": state.get("preferred_time_start"),
-        "preferred_time_end": state.get("preferred_time_end"),
         "dynamic_topics": dynamic_topics,
         "sessions": sessions, "daily_updates": [], "replan_count": state.get("_replan_count", 0),
         "study_preferences": state.get("study_preferences", {}),
@@ -1335,25 +1323,6 @@ with tab_today:
                 st.session_state.confirm_delete_plan = pr['id']
                 st.rerun()
 
-        # Make adaptive decisions inspectable during normal use and demos.
-        replan_history = pr.get("replan_history", [])
-        recovery_failures = [s for s in sessions if s.get("replan_failure")]
-        if replan_history or recovery_failures:
-            with st.expander("↻ Roadmap changes & recovery history", expanded=bool(recovery_failures)):
-                for entry in reversed(replan_history[-5:]):
-                    if entry.get("type") == "whole_roadmap_recovery":
-                        st.markdown(
-                            f"**Whole-roadmap recovery** · {entry.get('sessions_rescheduled', 0)} unfinished session(s) replanned"
-                        )
-                        st.caption(entry.get("reason", "Remaining roadmap rebuilt and verified."))
-                        st.caption(f"Missed: {', '.join(entry.get('missed_session_ids') or [])} · "
-                                   f"Replacement IDs: {', '.join(x for x in (entry.get('replacement_ids') or []) if x)}")
-                    else:
-                        st.markdown(f"**{entry.get('type', 'Plan update').replace('_', ' ').title()}**")
-                        st.caption(f"{entry.get('from_date', '—')} → {entry.get('to_date', '—')} · {entry.get('reason', '')}")
-                for failed in recovery_failures:
-                    st.error(f"Recovery needs attention for {failed.get('topic', 'a session')}: {failed['replan_failure']}")
-
         if st.session_state.get("confirm_delete_plan") == pr['id']:
             st.warning("Delete this plan and all of its study events? This cannot be undone.")
             confirm_col, cancel_col = st.columns(2)
@@ -1456,10 +1425,6 @@ with tab_today:
                             for existing in pr["sessions"]:
                                 if existing["id"] == sess["id"]:
                                     existing["status"] = parsed["status"]
-                                    if parsed["status"] == "partial":
-                                        # Partial work uses the smaller catch-up task from
-                                        # the check-in graph; don't process it as a full miss.
-                                        existing["replan_processed_at"] = datetime.now().isoformat(timespec="seconds")
                             pr.setdefault("daily_updates", []).append({
                                 "session_id": sess["id"], "status": parsed["status"], "text": update_text,
                                 "percent_done": parsed.get("percent_done"), "struggle_note": parsed.get("struggle_note"),
@@ -1468,34 +1433,10 @@ with tab_today:
                             })
                             if took_quiz:
                                 pr.setdefault("quiz_history", []).append({"topic": sess["topic"], "score": int(quiz_score)})
-                            if parsed.get("status") == "missed":
-                                # A missed check-in is a forced recovery trigger even
-                                # when its scheduled date is today. Rebuild the whole
-                                # plan, not just this one session.
-                                roadmap_changes = reconcile_overdue_sessions(
-                                    student, today=date.today(), force_session_ids={sess["id"]}
-                                )
-                                recovered = sum(1 for item in roadmap_changes if item.get("replacement"))
-                                if recovered:
-                                    st.toast(f"JASSI rebuilt the remaining roadmap and rescheduled {recovered} missed session(s).", icon="🗓️")
-                                else:
-                                    st.warning("JASSI marked the session as missed, but could not safely rebuild the remaining roadmap. Review the recovery reason in the plan history.")
-                            elif result.get("rescheduled_session"):
+                            if result.get("rescheduled_session"):
                                 new_sess = result["rescheduled_session"]
-                                # A replacement is a distinct session, not a second
-                                # record with the original session's ID.
-                                import uuid as _uuid
-                                old_session = next((item for item in pr["sessions"] if item["id"] == sess["id"]), None)
-                                new_sess["id"] = f"sess_{_uuid.uuid4().hex[:10]}"
-                                new_sess["rescheduled_from"] = sess["id"]
-                                new_sess["original_date"] = sess.get("date")
-                                if old_session is not None:
-                                    old_session["replanned_to"] = new_sess["id"]
-                                    old_session["replan_processed_at"] = datetime.now().isoformat(timespec="seconds")
                                 pr["sessions"].append(new_sess)
-                                student["calendar_events"] = [ev for ev in student["calendar_events"] if str(ev.get("id")) != str(sess["id"])]
                                 student["calendar_events"].append({"id": new_sess["id"], "title": f"{new_sess['topic'].title()} · {new_sess.get('resource_title','')}", "day": new_sess["day"], "date": new_sess.get("date"), "start": new_sess["start"], "end": new_sess["end"], "type": "study_session"})
-                                pr.setdefault("replan_history", []).append({"type": "checkin_recovery", "session_id": sess["id"], "replacement_id": new_sess["id"], "from_date": sess.get("date"), "to_date": new_sess.get("date"), "at": datetime.now().isoformat(timespec="seconds")})
                             log_reasoning(result.get("progress_insight", "Progress updated."))
                             save_student(student)
                             st.success("Progress saved!")
@@ -1595,27 +1536,62 @@ with tab_settings:
         pending_import = st.session_state.get("pending_timetable_import")
         if pending_import is not None:
             st.markdown("**Review extracted classes before importing**")
-            st.caption(f"{len(pending_import)} new event(s). Existing exact matches are excluded. Imported classes are treated as recurring weekly commitments.")
+            st.caption(f"{len(pending_import)} new event(s). Exact duplicates are excluded. Imported classes are treated as recurring weekly commitments.")
             if pending_import:
                 st.dataframe([
                     {"Class / activity": e["title"], "Day": e["day"],
                      "Start": e["start"], "End": e["end"], "Type": e["type"]}
                     for e in pending_import
                 ], use_container_width=True, hide_index=True)
-            else:
-                st.info("Everything extracted from this image already exists in your timetable.")
+
+            # Imported classes are fixed events. Existing commitments are never
+            # silently discarded: by default both are retained and the planner
+            # must schedule around their combined busy time.
+            existing_events = st.session_state.student.get("calendar_events", [])
+            conflicts = find_timetable_conflicts(pending_import, existing_events)
+            override_existing = st.checkbox(
+                "Let the uploaded timetable override conflicting existing commitments",
+                value=False,
+                key="timetable_import_override_existing",
+                help="When selected, overlapping existing calendar events are removed and the uploaded classes take their place. When unchecked, existing commitments are preserved and JASSI plans around both schedules.",
+            )
+            if conflicts:
+                conflict_names = sorted({
+                    f"{conflict['imported']['day']}: {conflict['imported']['title']} "
+                    f"({conflict['imported']['start']}–{conflict['imported']['end']}) conflicts with "
+                    f"{conflict['existing'].get('title', 'existing event')} "
+                    f"({conflict['existing'].get('start')}–{conflict['existing'].get('end')})"
+                    for conflict in conflicts
+                })
+                if override_existing:
+                    st.warning(f"{len(conflicts)} overlap(s) found. Confirming will replace the conflicting existing event(s) with the uploaded timetable.")
+                else:
+                    st.info(f"{len(conflicts)} overlap(s) found. Existing commitments will be kept; JASSI will treat both schedules as busy time and adapt new study sessions around them.")
+                with st.expander("Review timetable conflicts"):
+                    for conflict in conflict_names:
+                        st.write(f"• {conflict}")
+            elif pending_import:
+                st.success("No overlaps with existing commitments were found.")
+
             import_col, cancel_col = st.columns(2)
             with import_col:
                 if st.button("Confirm import", type="primary", use_container_width=True,
                              disabled=(not pending_import) or _processing):
-                    st.session_state.student["calendar_events"].extend(pending_import)
+                    merged_events, replaced_count = merge_timetable_import(
+                        existing_events, pending_import, override_conflicts=override_existing
+                    )
+                    st.session_state.student["calendar_events"] = merged_events
                     save_student(st.session_state.student)
                     st.session_state.pending_timetable_import = None
-                    st.success(f"Imported {len(pending_import)} timetable events.")
+                    st.success(
+                        f"Imported {len(pending_import)} timetable events. "
+                        + (f"Replaced {replaced_count} conflicting existing event(s)." if override_existing else "Existing commitments were preserved; future plans will adapt around them.")
+                    )
                     st.rerun()
             with cancel_col:
                 if st.button("Cancel", use_container_width=True):
                     st.session_state.pending_timetable_import = None
+                    st.session_state.timetable_import_override = False
                     st.rerun()
     with tab3:
         st.caption("Connect Google Calendar to import this week's events.")

@@ -1,6 +1,9 @@
 import json
 import unittest
-from app.tools.constraint_parser import parse_image_with_llm, _normalize_timetable_time
+from app.tools.constraint_parser import (
+    parse_image_with_llm, _normalize_timetable_time,
+    find_timetable_conflicts, merge_timetable_import,
+)
 
 
 class FakeVisionClient:
@@ -33,6 +36,39 @@ class TestTimetableImageParser(unittest.TestCase):
         self.assertEqual(events[0]["start"], "08:00")
         self.assertEqual(events[1]["start"], "14:00")
         self.assertIn("recurring weekly", client.system_prompt)
+
+
+    def test_normalizes_24_hour_and_ocr_punctuation_times(self):
+        self.assertEqual(_normalize_timetable_time("08:00"), "08:00")
+        self.assertEqual(_normalize_timetable_time("8.50"), "08:50")
+        self.assertEqual(_normalize_timetable_time("0800"), "08:00")
+        self.assertEqual(_normalize_timetable_time("6:30 PM"), "18:30")
+
+    def test_accepts_wrapped_json_and_alternate_event_field_names(self):
+        response = "Here are the events:\n```json\n{\"events\":[{\"course\":\"PHY F101 Tutorial\",\"weekday\":\"Mon\",\"time_range\":\"09:00 - 09:50\"}]}\n```"
+        events = parse_image_with_llm(FakeVisionClient(response), b"fake-image")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["day"], "Monday")
+        self.assertEqual(events[0]["start"], "09:00")
+        self.assertEqual(events[0]["end"], "09:50")
+
+    def test_import_preserves_conflicting_commitments_by_default(self):
+        existing = [{"id": "old", "title": "Lab", "day": "Monday", "start": "09:00", "end": "10:00", "type": "hard"}]
+        imported = [{"id": "new", "title": "Lecture", "day": "Monday", "start": "09:30", "end": "10:30", "type": "hard"}]
+        self.assertEqual(len(find_timetable_conflicts(imported, existing)), 1)
+        merged, replaced = merge_timetable_import(existing, imported, override_conflicts=False)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(replaced, 0)
+
+    def test_import_override_replaces_only_overlapping_events(self):
+        existing = [
+            {"id": "old", "title": "Lab", "day": "Monday", "start": "09:00", "end": "10:00", "type": "hard"},
+            {"id": "keep", "title": "Meeting", "day": "Tuesday", "start": "09:00", "end": "10:00", "type": "hard"},
+        ]
+        imported = [{"id": "new", "title": "Lecture", "day": "Monday", "start": "09:30", "end": "10:30", "type": "hard"}]
+        merged, replaced = merge_timetable_import(existing, imported, override_conflicts=True)
+        self.assertEqual(replaced, 1)
+        self.assertEqual({event["id"] for event in merged}, {"keep", "new"})
 
     def test_rejects_empty_or_unreadable_timetable(self):
         with self.assertRaises(RuntimeError):
