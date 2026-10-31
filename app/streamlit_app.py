@@ -697,7 +697,6 @@ UPDATE_STEP_LABELS = {
 }
 
 
-@_single_flight_action
 def stream_graph_with_status(graph, initial_state: dict, step_labels: dict, slot) -> dict:
     """Streams a compiled LangGraph graph node-by-node, updating `slot` with a
     centered spinning status ('..retrieving', '..working on it', etc.)
