@@ -49,7 +49,9 @@ def _build_busy_map(calendar_events: List[Dict[str, Any]], respect_soft: bool = 
     for ev in calendar_events:
         if ev.get("type") == "soft" and not respect_soft:
             continue
-        if ev.get("type") == "study_session":
+        # Legacy study sessions without a concrete date are recurring weekday
+        # commitments. Dated study sessions are added to busy_by_date below.
+        if ev.get("type") == "study_session" and ev.get("date"):
             continue
         day = ev["day"]
         busy.setdefault(day, []).append((_time_to_minutes(ev["start"]), _time_to_minutes(ev["end"])))
@@ -183,12 +185,24 @@ def build_schedule_dated(sessions_needed: List[Dict[str, Any]], calendar_events:
     # on that exact date (from a previous scheduling run).
     busy_by_date: Dict[str, List[tuple]] = {}
     daily_load: Dict[str, int] = {}
-    for s in existing_dated_sessions:
-        if s.get("date"):
-            busy_by_date.setdefault(s["date"], []).append(
-                (_time_to_minutes(s["start"]), _time_to_minutes(s["end"]))
-            )
-            daily_load[s["date"]] = daily_load.get(s["date"], 0) + s.get("duration_mins", 0)
+    # Existing dated study sessions are date-specific blockers. Include both
+    # calendar events and the explicit existing_sessions argument, de-duping by
+    # event ID so a session represented in both places is counted only once.
+    dated_existing = {}
+    for event in active_events:
+        if event.get("type") == "study_session" and event.get("date"):
+            dated_existing[event.get("id") or (event.get("date"), event.get("start"), event.get("end"))] = event
+    for event in existing_dated_sessions:
+        if event.get("date"):
+            dated_existing[event.get("id") or (event.get("date"), event.get("start"), event.get("end"))] = event
+    for s in dated_existing.values():
+        date_key = s["date"]
+        busy_by_date.setdefault(date_key, []).append(
+            (_time_to_minutes(s["start"]), _time_to_minutes(s["end"]))
+        )
+        daily_load[date_key] = daily_load.get(date_key, 0) + int(s.get("duration_mins") or (
+            _time_to_minutes(s["end"]) - _time_to_minutes(s["start"])
+        ))
 
     dates = []
     for i in range(max(1, deadline_days)):

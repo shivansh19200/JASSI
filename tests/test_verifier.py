@@ -49,3 +49,26 @@ class TestVerifier(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_detects_overlap_with_existing_study_session(self):
+        calendar = self.calendar + [{
+            "id": "existing-ml", "title": "Machine Learning", "day": "Saturday",
+            "date": "2026-11-07", "start": "07:00", "end": "08:30",
+            "type": "study_session",
+        }]
+        sessions = [{"id": "new-sd", "topic": "system_design", "day": "Saturday",
+                    "date": "2026-11-07", "start": "07:00", "end": "07:45"}]
+        result = verifier.verify_plan(sessions, calendar, self.topics_data, deadline_days=7)
+        self.assertFalse(result["passed"])
+        self.assertTrue(any("conflicts with study session" in issue for issue in result["issues"]))
+
+    def test_detects_overlap_with_soft_commitment(self):
+        calendar = self.calendar + [{
+            "id": "soft-1", "title": "Club", "day": "Saturday",
+            "start": "07:00", "end": "08:30", "type": "soft",
+        }]
+        sessions = [{"id": "new-sd", "topic": "system_design", "day": "Saturday",
+                    "start": "07:00", "end": "07:45"}]
+        result = verifier.verify_plan(sessions, calendar, self.topics_data, deadline_days=7)
+        self.assertFalse(result["passed"])
+        self.assertTrue(any("conflicts with soft commitment" in issue for issue in result["issues"]))

@@ -78,3 +78,45 @@ class TestScheduler(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestExistingStudySessionConflicts(unittest.TestCase):
+    def test_recurring_study_session_blocks_same_weekday_slot(self):
+        from datetime import date
+        calendar = [{"id": "ml", "title": "Machine Learning", "day": "Saturday",
+                    "start": "07:00", "end": "08:30", "type": "study_session"}]
+        result = scheduler.build_schedule_dated(
+            [{"topic": "system_design", "duration_mins": 45, "order": 0}],
+            calendar, start_date=date(2026, 11, 7), deadline_days=1,
+            allowed_days=["Saturday"], wake_start="07:00", sleep_start="18:00",
+            max_daily_study_hours=3,
+        )
+        self.assertEqual(len(result["scheduled"]), 1)
+        session = result["scheduled"][0]
+        self.assertEqual(session["start"], "08:30")
+        self.assertFalse(session["start"] < "08:30" and session["end"] > "07:00")
+
+    def test_dated_study_session_blocks_only_its_exact_date(self):
+        from datetime import date
+        calendar = [{"id": "ml", "title": "Machine Learning", "day": "Saturday",
+                    "date": "2026-11-07", "start": "07:00", "end": "08:30",
+                    "type": "study_session"}]
+        result = scheduler.build_schedule_dated(
+            [{"topic": "system_design", "duration_mins": 45, "order": 0}],
+            calendar, start_date=date(2026, 11, 7), deadline_days=1,
+            allowed_days=["Saturday"], wake_start="07:00", sleep_start="18:00",
+            max_daily_study_hours=3,
+        )
+        self.assertEqual(result["scheduled"][0]["start"], "08:45")
+
+    def test_dated_study_session_does_not_block_following_week(self):
+        from datetime import date
+        calendar = [{"id": "ml", "title": "Machine Learning", "day": "Saturday",
+                    "date": "2026-11-07", "start": "07:00", "end": "08:30",
+                    "type": "study_session"}]
+        result = scheduler.build_schedule_dated(
+            [{"topic": "system_design", "duration_mins": 45, "order": 0}],
+            calendar, start_date=date(2026, 11, 14), deadline_days=1,
+            allowed_days=["Saturday"], wake_start="07:00", sleep_start="18:00",
+            max_daily_study_hours=3,
+        )
+        self.assertEqual(result["scheduled"][0]["start"], "07:00")

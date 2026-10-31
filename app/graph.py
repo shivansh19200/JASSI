@@ -16,7 +16,6 @@ from app.nodes import llm_nodes, tool_nodes
 from app.tools import feasibility as feasibility_tool
 from app.tools import scheduler as scheduler_tool
 from app.vectorstore.resource_retriever import ResourceRetriever
-from app.tools.resource_lookup import recommend_youtube_resources
 
 
 class PlanningState(TypedDict, total=False):
@@ -191,15 +190,11 @@ def node_generate_resource_paths(state: PlanningState) -> PlanningState:
                 resource = resource_by_id.get(session.get("resource_id"))
                 if resource and resource.get("url"):
                     session["resource_url"] = resource["url"]
-                # When the learner did not supply a course/playlist, ask Groq for
-                # focused search queries and resolve them to actual YouTube URLs.
-                if not matching_refs and not session.get("resources"):
-                    session["resources"] = recommend_youtube_resources(
-                        info.get("name", topic), session.get("title", ""),
-                        client=state.get("client"), limit=3,
-                    )
-                    if session["resources"]:
-                        session["resource_url"] = session["resources"][0]["url"]
+                # Resource search is intentionally deferred until a learner
+                # selects a path / opens a session. Searching every session in
+                # every alternative path made the options screen needlessly slow
+                # and could surface unrelated videos. Empty resources are safer
+                # than unverified links; the UI provides a topic-specific search.
         if not paths and candidate_resources:
             # Keep the app usable if the model returns malformed/empty JSON.
             ordered = sorted(candidate_resources, key=lambda r: r.get("duration_mins", 30))

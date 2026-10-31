@@ -84,9 +84,14 @@ def node_build_schedule(state: Dict[str, Any]) -> Dict[str, Any]:
 def node_verify_plan(state: Dict[str, Any]) -> Dict[str, Any]:
     topics_data = _load_merged_topics(state)
     all_sessions = state["schedule_result"]["scheduled"] + state.get("existing_sessions", [])
+    moved_soft_ids = set(state.get("moved_soft_event_ids") or [])
+    verification_calendar = [
+        event for event in state["calendar_events"]
+        if event.get("id") not in moved_soft_ids
+    ]
     result = verifier.verify_plan(
         sessions=all_sessions,
-        calendar_events=state["calendar_events"],
+        calendar_events=verification_calendar,
         topics_data=topics_data,
         deadline_days=state["pr_deadline_days"],
     )

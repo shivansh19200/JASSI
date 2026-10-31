@@ -12,3 +12,5 @@ python-dotenv>=1.0.1
 Pillow>=10.4.0
 
 ddgs>=9.0.0
+
+pytesseract>=0.3.13

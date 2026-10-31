@@ -16,33 +16,50 @@ def verify_plan(sessions: List[Dict[str, Any]], calendar_events: List[Dict[str, 
                  topics_data: Dict[str, Any], deadline_days: int) -> Dict[str, Any]:
     issues = []
 
-    # 1. Conflict check: sessions vs hard constraints, and sessions vs each other
-    hard_events = [ev for ev in calendar_events if ev.get("type") == "hard"]
-    for i, s in enumerate(sessions):
+    # 1. Conflict check against every occupied calendar event (fixed classes,
+    # movable commitments, and already-scheduled JASSI sessions). Dated events
+    # only block that exact date; legacy events without a date recur weekly.
+    blocking_events = [
+        ev for ev in calendar_events
+        if ev.get("type") in ("hard", "soft", "study_session")
+    ]
+    for s in sessions:
         s_start, s_end = _time_to_minutes(s["start"]), _time_to_minutes(s["end"])
-        for ev in hard_events:
-            if ev["day"] != s["day"]:
+        for ev in blocking_events:
+            if ev.get("id") and ev.get("id") == s.get("id"):
+                continue
+            if ev.get("day") != s.get("day"):
+                continue
+            if s.get("date") and ev.get("date") and s["date"] != ev["date"]:
                 continue
             e_start, e_end = _time_to_minutes(ev["start"]), _time_to_minutes(ev["end"])
             if _overlaps(s_start, s_end, e_start, e_end):
-                issues.append(f"Session '{s.get('topic')}' on {s['day']} {s['start']}-{s['end']} "
-                               f"conflicts with hard constraint '{ev['title']}'.")
-        for j, other in enumerate(sessions):
-            if i >= j:
-                continue
-            # If both sessions carry a real date (month-spanning schedules), only
-            # compare sessions that fall on the SAME date — otherwise two
-            # sessions that just happen to share a weekday name in different
-            # weeks (e.g. two different Mondays) would be flagged as clashing.
+                label = {
+                    "study_session": "study session",
+                    "hard": "hard constraint",
+                    "soft": "soft commitment",
+                }.get(ev.get("type"), "calendar event")
+                issues.append(
+                    f"Session '{s.get('topic')}' on {s.get('date', s['day'])} "
+                    f"{s['start']}-{s['end']} conflicts with {label} '{ev.get('title', 'Untitled')}'."
+                )
+
+    # Proposed sessions must not overlap one another either. Compare dates
+    # where available, otherwise use the recurring weekday.
+    for i, s in enumerate(sessions):
+        s_start, s_end = _time_to_minutes(s["start"]), _time_to_minutes(s["end"])
+        for other in sessions[i + 1:]:
             if s.get("date") and other.get("date"):
                 if s["date"] != other["date"]:
                     continue
-            elif other["day"] != s["day"]:
+            elif other.get("day") != s.get("day"):
                 continue
             o_start, o_end = _time_to_minutes(other["start"]), _time_to_minutes(other["end"])
             if _overlaps(s_start, s_end, o_start, o_end):
-                issues.append(f"Session '{s.get('topic')}' overlaps with session '{other.get('topic')}' "
-                               f"on {s.get('date', s['day'])}.")
+                issues.append(
+                    f"Session '{s.get('topic')}' overlaps with session '{other.get('topic')}' "
+                    f"on {s.get('date', s['day'])}."
+                )
 
     # 2. Prerequisite ordering check (approximate: within-topic scheduling order)
     lookup = {t["id"]: t for t in topics_data["topics"]}
@@ -74,8 +91,8 @@ def verify_plan(sessions: List[Dict[str, Any]], calendar_events: List[Dict[str, 
     passed = len(issues) == 0
     friendly = []
     for issue in issues:
-        if "conflicts with hard constraint" in issue:
-            friendly.append("A study session overlaps with a fixed commitment. Move the session to another free time.")
+        if "conflicts with hard constraint" in issue or "conflicts with soft commitment" in issue or "conflicts with study session" in issue:
+            friendly.append("A study session overlaps with an existing timetable event. Move it to another free time.")
         elif "overlaps with session" in issue:
             friendly.append("Two study sessions were placed at the same time. Choose a different time for one of them.")
         elif "Prerequisite violation" in issue:

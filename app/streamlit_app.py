@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import uuid
+import time
 from datetime import datetime, date, timedelta
 import streamlit as st
 
@@ -28,7 +29,7 @@ DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 
 st.set_page_config(page_title="JASSI · Learning Planner", page_icon="🧭", layout="wide",
                     initial_sidebar_state="expanded")
-APP_BUILD_VERSION = "2026-10-31-plan-day-workspace-resource-relevance"
+APP_BUILD_VERSION = "2026-10-31-latency-overlap-timetable-import"
 st.session_state.setdefault("_jassi_processing", False)
 st.session_state.setdefault("selected_plan_day", None)
 st.session_state.setdefault("confirm_delete_plan", None)
@@ -442,6 +443,8 @@ if "pending_resource_choice" not in st.session_state:
     st.session_state.pending_resource_choice = None
 if "editing_event_id" not in st.session_state:
     st.session_state.editing_event_id = None
+if "pending_timetable_import" not in st.session_state:
+    st.session_state.pending_timetable_import = None
 if "retriever" not in st.session_state:
     with st.spinner("Indexing learning resources for semantic search..."):
         st.session_state.retriever = ResourceRetriever(RESOURCES_PATH)
@@ -702,18 +705,27 @@ def stream_graph_with_status(graph, initial_state: dict, step_labels: dict, slot
     centered spinning status ('..retrieving', '..working on it', etc.)
     as each node runs, and returns the final accumulated state."""
     final_state = dict(initial_state)
+    stage_timings = {}
+    previous_tick = time.perf_counter()
     render_status(slot, "✨", "Working on it...")
     try:
         for update in graph.stream(initial_state, stream_mode="updates"):
+            now = time.perf_counter()
             for node_name, node_state in update.items():
+                stage_timings[node_name] = round(now - previous_tick, 3)
+                previous_tick = now
                 if isinstance(node_state, dict):
                     final_state.update(node_state)
                 icon, label = step_labels.get(node_name, ("✨", "Working on it..."))
                 render_status(slot, icon, label)
     except Exception:
-        # fall back to a single blocking call if streaming isn't supported
-        render_status(slot, "✨", "Working on it...")
-        final_state = graph.invoke(initial_state)
+        # Do not invoke the graph a second time after a node/API failure.
+        # Re-running here can duplicate expensive Groq calls and makes latency
+        # worse while hiding the original exception.
+        slot.empty()
+        raise
+    final_state["_stage_timings_seconds"] = stage_timings
+    final_state["_graph_elapsed_seconds"] = round(sum(stage_timings.values()), 3)
     slot.empty()
     return final_state
 
@@ -1181,6 +1193,12 @@ elif st.session_state.pending_resource_choice:
       </div>
     </div>
     """, unsafe_allow_html=True)
+    stage_timings = rc["state"].get("_stage_timings_seconds") or {}
+    if stage_timings:
+        with st.expander("Planning diagnostics", expanded=False):
+            st.caption(f"Graph execution: {rc['state'].get('_graph_elapsed_seconds', 0):.2f}s")
+            for stage_name, seconds in stage_timings.items():
+                st.write(f"{stage_name.replace('_', ' ').title()}: {seconds:.2f}s")
 
     for topic_opt in options:
         topic = topic_opt["topic"]
@@ -1557,19 +1575,48 @@ with tab_settings:
                     st.rerun()
     with tab2:
         img_file = st.file_uploader("Upload timetable screenshot", type=["png", "jpg", "jpeg"])
-        if img_file and st.button("Parse with AI", use_container_width=True, disabled=_processing):
+        if img_file and st.button("Read timetable", use_container_width=True, disabled=_processing):
             client = get_client()
             render_status(status_slot, "🖼️", "Reading your timetable...")
             try:
-                events = parse_image_with_llm(client, img_file.read())
+                events = parse_image_with_llm(client, img_file.getvalue())
+                existing_keys = {
+                    (str(e.get("title", "")).casefold(), e.get("day"), e.get("start"), e.get("end"))
+                    for e in st.session_state.student.get("calendar_events", [])
+                }
+                fresh_events = [e for e in events if
+                    (e["title"].casefold(), e["day"], e["start"], e["end"]) not in existing_keys]
+                st.session_state.pending_timetable_import = fresh_events
                 status_slot.empty()
-                st.session_state.student["calendar_events"].extend(events)
-                save_student(st.session_state.student)
-                st.success(f"Imported {len(events)} events")
                 st.rerun()
             except RuntimeError as e:
                 status_slot.empty()
                 st.error(str(e))
+        pending_import = st.session_state.get("pending_timetable_import")
+        if pending_import is not None:
+            st.markdown("**Review extracted classes before importing**")
+            st.caption(f"{len(pending_import)} new event(s). Existing exact matches are excluded. Imported classes are treated as recurring weekly commitments.")
+            if pending_import:
+                st.dataframe([
+                    {"Class / activity": e["title"], "Day": e["day"],
+                     "Start": e["start"], "End": e["end"], "Type": e["type"]}
+                    for e in pending_import
+                ], use_container_width=True, hide_index=True)
+            else:
+                st.info("Everything extracted from this image already exists in your timetable.")
+            import_col, cancel_col = st.columns(2)
+            with import_col:
+                if st.button("Confirm import", type="primary", use_container_width=True,
+                             disabled=(not pending_import) or _processing):
+                    st.session_state.student["calendar_events"].extend(pending_import)
+                    save_student(st.session_state.student)
+                    st.session_state.pending_timetable_import = None
+                    st.success(f"Imported {len(pending_import)} timetable events.")
+                    st.rerun()
+            with cancel_col:
+                if st.button("Cancel", use_container_width=True):
+                    st.session_state.pending_timetable_import = None
+                    st.rerun()
     with tab3:
         st.caption("Connect Google Calendar to import this week's events.")
         if st.button("Connect Google Calendar", use_container_width=True, disabled=_processing):

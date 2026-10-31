@@ -55,7 +55,7 @@ class GroqClient:
         return completion.choices[0].message.content
 
     def chat_vision(self, system_prompt: str, image_b64: str,
-                     vision_model: Optional[str] = None) -> str:
+                     vision_model: Optional[str] = None, mime_type: str = "image/png") -> str:
         vision_model = vision_model or os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
         completion = self._client.chat.completions.create(
             model=vision_model,
@@ -65,7 +65,7 @@ class GroqClient:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Extract the timetable events from this image."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
                     ],
                 },
             ],
