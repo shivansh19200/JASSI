@@ -305,6 +305,38 @@ def node_noop(state: PlanningState) -> PlanningState:
     return state
 
 
+def build_planning_intake_graph():
+    """First resumable planning stage: interpret the student's request.
+
+    The UI pauses after this stage to collect missing day/time preferences.
+    Keeping that human decision outside the graph avoids pretending the model
+    can infer a student's availability.
+    """
+    graph = StateGraph(PlanningState)
+    graph.add_node("parse_planning_request", node_parse_pr)
+    graph.set_entry_point("parse_planning_request")
+    graph.add_edge("parse_planning_request", END)
+    return graph.compile()
+
+
+def build_planning_resource_graph():
+    """Second resumable stage: synthesize an uncatalogued topic if needed,
+    then construct resource pathways. The UI pauses for the student's choice.
+    """
+    graph = StateGraph(PlanningState)
+    graph.add_node("synthesize_topic", node_synthesize_topic)
+    graph.add_node("generate_resource_paths", node_generate_resource_paths)
+    graph.add_node("no_topic_match", node_noop)
+    graph.set_entry_point("synthesize_topic")
+    graph.add_conditional_edges(
+        "synthesize_topic", route_after_synthesize,
+        {"matched": "generate_resource_paths", "unmatched": "no_topic_match"},
+    )
+    graph.add_edge("generate_resource_paths", END)
+    graph.add_edge("no_topic_match", END)
+    return graph.compile()
+
+
 def build_planning_request_graph():
     graph = StateGraph(PlanningState)
     graph.add_node("parse_planning_request", node_parse_pr)
@@ -388,9 +420,16 @@ def node_reschedule_if_missed(state: UpdateState) -> UpdateState:
     state["rescheduled_session"] = None
 
     if status == "missed":
-        target_session = state["session"]
-        exclude_day = state["session"]["day"]
-        reason = "it's the next slot that doesn't clash with your other commitments"
+        # Whole-roadmap recovery is performed by the Streamlit orchestration
+        # layer, which has the complete student + plan state. A single-session
+        # replacement here would leave dependent sessions stale.
+        state["rescheduled_session"] = None
+        state["reschedule_explanation"] = (
+            "The missed session will trigger a rebuild of the remaining roadmap. "
+            "JASSI will place all unfinished sessions together, preserve completed work, "
+            "respect prerequisites and the original deadline, then verify the full plan."
+        )
+        return state
     elif status == "partial" and percent_done < 70:
         remaining_pct = max(0, 100 - percent_done)
         original_duration = state["session"].get("duration_mins", 30)

@@ -270,29 +270,41 @@ def build_schedule_dated(sessions_needed: List[Dict[str, Any]], calendar_events:
 def reschedule_single_dated(session: Dict[str, Any], calendar_events: List[Dict[str, Any]],
                              all_current_sessions: List[Dict[str, Any]],
                              start_date: "datetime.date", horizon_days: int = 21,
-                             exclude_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                             exclude_date: Optional[str] = None,
+                             study_preferences: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Date-aware version of reschedule_single: finds the next free dated slot
     within `horizon_days` of start_date, so a missed session gets a real
     future date instead of just "some day with this weekday name"."""
     import datetime as _dt
+    preferences = study_preferences or {}
     weekday_busy = _build_busy_map(calendar_events, respect_soft=True)
-    duration = session["duration_mins"]
+    duration = int(session["duration_mins"])
     busy_by_date: Dict[str, List[tuple]] = {}
+    load_by_date: Dict[str, int] = {}
     for s in all_current_sessions:
         if s["id"] != session["id"] and s.get("date"):
             busy_by_date.setdefault(s["date"], []).append(
                 (_time_to_minutes(s["start"]), _time_to_minutes(s["end"]))
             )
+            load_by_date[s["date"]] = load_by_date.get(s["date"], 0) + int(s.get("duration_mins", 0) or 0)
+
+    day_start = max(DAY_START_HOUR * 60, _time_to_minutes(preferences.get("wake_start", "07:00")))
+    day_end = min(DAY_END_HOUR * 60, _time_to_minutes(preferences.get("sleep_start", "23:00")))
+    if day_end <= day_start:
+        day_end = DAY_END_HOUR * 60
+    daily_cap = int(float(preferences.get("max_daily_study_hours", 3.0)) * 60)
 
     for i in range(horizon_days):
         d = start_date + _dt.timedelta(days=i)
         date_iso = d.isoformat()
         if exclude_date and date_iso == exclude_date:
             continue
+        if daily_cap and load_by_date.get(date_iso, 0) + duration > daily_cap:
+            continue
         weekday = DAY_ORDER[d.weekday()]
         busy_today = list(weekday_busy.get(weekday, [])) + busy_by_date.get(date_iso, [])
         busy_today.sort()
-        free = _find_free_slots(busy_today, duration)
+        free = _find_free_slots(busy_today, duration, day_start=day_start, day_end=day_end)
         if free:
             start, end = free[0]
             new_session = dict(session)

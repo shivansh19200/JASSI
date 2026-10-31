@@ -15,9 +15,16 @@ Python handles math, scheduling, and verification — wired together with
 | Explains its decisions | Groq LLM generates feasibility explanations, trade-offs, schedule reasoning |
 | Finds relevant material | FAISS (or TF-IDF fallback) semantic search over resource embeddings — not keyword matching |
 | Does the math correctly | Deterministic Python: feasibility hours, constraint-satisfaction scheduling, Bayesian mastery updates, conflict/prerequisite verification |
-| Replans on its own | LangGraph conditional routing reschedules missed sessions, adjusts for quiz results, and reruns verification automatically |
+| Adapts after progress updates | LangGraph routes parsed check-ins through mastery updates; missed sessions trigger dependency-aware replanning of the entire remaining roadmap, followed by deterministic verification |
 
 ## Architecture
+
+The interactive planning journey is executed as resumable LangGraph stages:
+request parsing, topic synthesis/resource-path discovery, and the daily progress
+workflow. Streamlit deliberately pauses between graph stages when it needs a
+student decision (for example, choosing study days or a resource path). The
+final scheduling stage is currently coordinated by the UI around deterministic
+scheduler and verifier functions; it is not a single uninterrupted graph run.
 
 ```
 jassi/
@@ -143,12 +150,10 @@ notion of "semantic." Nothing else in the app changes.
 5. LLM generates a Reality Check with 3 trade-off options; user picks one
 6. FAISS retrieves relevant resources by meaning, not keywords; a schedule is built and verified
 7. LLM explains why the schedule looks the way it does
-8. User reports a missed session → LLM parses the update, the scheduler finds the next open slot, LLM explains the change
-9. User submits a low quiz score → mastery updates via the Bayesian formula, LLM surfaces a progress insight and adjusts scope
+8. User reports a missed session → the app rebuilds all unfinished sessions in prerequisite order and verifies the complete replacement roadmap
+9. User submits a low quiz score → mastery updates via the Bayesian formula and the LLM surfaces a progress insight
 
-`demo_script.py` runs all of this end-to-end from the terminal and prints every
-LLM-generated explanation alongside the deterministic results, so you can see
-both halves of the hybrid architecture working together.
+`demo_script.py` runs the LLM + deterministic planning and progress flow from the terminal. For the live judging sequence, follow [DEMO_RUNTHROUGH.md](DEMO_RUNTHROUGH.md): create a dependency-ordered roadmap, miss a session, and show whole-roadmap recovery.
 
 ## Known limitations / next steps
 
@@ -160,3 +165,6 @@ both halves of the hybrid architecture working together.
 - User-supplied resources are selected using the title, URL, and duration the
   student enters. JASSI does not automatically crawl arbitrary course pages.
 - Drag-and-drop manual timetable editing is not implemented yet.
+- Recovery rebuilds all unfinished sessions in prerequisite order, keeps completed work as history, respects the original remaining deadline and daily limits, and commits only after the full candidate roadmap passes verification. If the remaining work cannot fit, it preserves the prior active roadmap and records a recovery failure rather than silently extending the deadline.
+- Student state is currently stored in a shared local JSON file (`data/demo_student.json`). This is suitable for a single-user demo, not a concurrent multi-user deployment. Add authentication and per-user database records before exposing private student data to multiple users.
+- Recovery runs when the Streamlit app executes (startup/rerun); there is no independent background worker that monitors deadlines while the app is closed.
