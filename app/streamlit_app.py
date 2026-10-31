@@ -31,10 +31,11 @@ DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 
 st.set_page_config(page_title="JASSI · Learning Planner", page_icon="🧭", layout="wide",
                     initial_sidebar_state="expanded")
-APP_BUILD_VERSION = "2026-10-31-latency-overlap-timetable-import"
+APP_BUILD_VERSION = "2026-10-31-weekly-timetable-navigation"
 st.session_state.setdefault("_jassi_processing", False)
 st.session_state.setdefault("selected_plan_day", None)
 st.session_state.setdefault("confirm_delete_plan", None)
+st.session_state.setdefault("timetable_week_offset", 0)
 
 # ---------------------------------------------------------------------------
 # Premium visual theme
@@ -1447,24 +1448,39 @@ with tab_timetable:
     view = st.radio("View", ["This week", "Month (full trajectory)"], horizontal=True, label_visibility="collapsed")
     events = st.session_state.student["calendar_events"]
     if view == "This week":
-        # A dated event (e.g. a study session scheduled for a specific future
-        # Wednesday several weeks out) only belongs in THIS week if its date
-        # actually falls in it — otherwise every dated session sharing that
-        # weekday name piles into one column regardless of which week it's
-        # really on. Recurring hard/soft events (no "date") always repeat.
+        # Navigate by whole weeks. Recurring commitments (without a date)
+        # appear every week, while dated study sessions only appear in the
+        # exact week they were scheduled for.
+        nav_prev, nav_today, nav_label, nav_next = st.columns([1, 1, 3, 1])
+        if nav_prev.button("← Previous", use_container_width=True, key="timetable_prev_week"):
+            st.session_state.timetable_week_offset -= 1
+            st.rerun()
+        if nav_today.button("Today", use_container_width=True, disabled=(st.session_state.timetable_week_offset == 0), key="timetable_today"):
+            st.session_state.timetable_week_offset = 0
+            st.rerun()
+
         today = date.today()
-        week_start = today - timedelta(days=today.weekday())
+        current_week_start = today - timedelta(days=today.weekday())
+        week_start = current_week_start + timedelta(weeks=st.session_state.timetable_week_offset)
         week_end = week_start + timedelta(days=6)
-        this_week_events = [
+        nav_label.markdown(
+            f"<div style='text-align:center;padding:7px 0;font-weight:700'>{week_start.strftime('%b %d')} – {week_end.strftime('%b %d, %Y')}</div>",
+            unsafe_allow_html=True,
+        )
+        if nav_next.button("Next →", use_container_width=True, key="timetable_next_week"):
+            st.session_state.timetable_week_offset += 1
+            st.rerun()
+
+        week_events = [
             ev for ev in events
             if not ev.get("date") or (week_start.isoformat() <= ev["date"] <= week_end.isoformat())
         ]
         events_by_day = {d: [] for d in DAY_ORDER}
-        for ev in this_week_events:
+        for ev in week_events:
             events_by_day.setdefault(ev["day"], []).append(ev)
         for d in events_by_day:
             events_by_day[d].sort(key=lambda e: e["start"])
-        st.caption(f"Week of {week_start.strftime('%b %d')} – {week_end.strftime('%b %d')} · click any event to edit or delete it")
+        st.caption("Click any event to edit or delete it. Recurring commitments appear every week.")
         render_editable_timetable_grid(events_by_day, DAY_ORDER)
     else:
         # Deadlines can run for weeks, so this shows the whole window at a
