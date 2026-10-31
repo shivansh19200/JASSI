@@ -1,170 +1,250 @@
-# JASSI — Agentic AI Learning Planner
+# JASSI — Your AI-Powered Learning Planner
 
-JASSI is an autonomous learning-planning agent that continuously works toward a
-student's learning goal under changing performance, availability, and resource
-constraints. It's built as a **hybrid agentic system**: an LLM (Groq) handles
-natural language understanding, generation, and reasoning, while deterministic
-Python handles math, scheduling, and verification — wired together with
-**LangGraph**.
+JASSI helps you turn a learning goal into a study plan you can actually follow.
 
-## What makes this "agentic" and not just automation
+Tell it what you want to learn, how much time you have, and what your week looks like. JASSI checks whether your goal is realistic, finds useful learning resources, and builds a timetable around your existing commitments. If you miss a session or your progress changes, it can help adjust the plan.
 
-| Capability | How it's implemented |
-|---|---|
-| Understands casual requests | Groq LLM parses free text → structured planning request |
-| Explains its decisions | Groq LLM generates feasibility explanations, trade-offs, schedule reasoning |
-| Finds relevant material | FAISS (or TF-IDF fallback) semantic search over resource embeddings — not keyword matching |
-| Does the math correctly | Deterministic Python: feasibility hours, constraint-satisfaction scheduling, Bayesian mastery updates, conflict/prerequisite verification |
-| Adapts after progress updates | LangGraph routes parsed check-ins through mastery updates; missed sessions trigger dependency-aware replanning of the entire remaining roadmap, followed by deterministic verification |
+The idea is simple: **a study plan should adapt to your life, not the other way around.**
 
-## Architecture
+## What can JASSI do?
 
-The interactive planning journey is executed as resumable LangGraph stages:
-request parsing, topic synthesis/resource-path discovery, and the daily progress
-workflow. Streamlit deliberately pauses between graph stages when it needs a
-student decision (for example, choosing study days or a resource path). The
-final scheduling stage is currently coordinated by the UI around deterministic
-scheduler and verifier functions; it is not a single uninterrupted graph run.
+- **Understand your goal.** Describe what you want to learn in everyday language.
+- **Check if your goal is realistic.** JASSI compares the work ahead with the time you have.
+- **Find learning resources.** It searches the resource collection for material related to your topics.
+- **Build a timetable.** Study sessions are placed around classes and other commitments.
+- **Explain its choices.** You get a plain-language explanation of the plan and its trade-offs.
+- **Adjust when things change.** Missed sessions and quiz results can update the remaining plan and your estimated topic mastery.
 
+JASSI uses an LLM for understanding and explanations. Important calculations—like available study time, scheduling, and plan checks—are handled by Python code so they can be tested consistently.
+
+## How it works
+
+### 1. From a goal to a study plan
+
+```mermaid
+flowchart TD
+    A["You describe your learning goal"] --> B["JASSI understands the request"]
+    B --> C["Estimate the work required"]
+    C --> D["Check your available study time"]
+    D --> E{"Can the goal fit?"}
+    E -- "Not yet" --> F["Show the gap and possible trade-offs"]
+    F --> G["You choose how to adjust"]
+    G --> H["Find relevant learning resources"]
+    E -- "Yes" --> H
+    H --> I["Build your study timetable"]
+    I --> J["Check conflicts and prerequisites"]
+    J --> K{"Does the plan pass?"}
+    K -- "No" --> I
+    K -- "Yes" --> L["Show your study plan"]
 ```
-jassi/
+
+### 2. When your week does not go to plan
+
+JASSI can respond to a missed session or a quiz result. A missed session triggers a rebuild of the unfinished roadmap; completed work stays in your history.
+
+```mermaid
+flowchart TD
+    A["You share a progress update"] --> B["Understand what happened"]
+    B --> C{"What changed?"}
+    C -- "Missed a session" --> D["Keep completed work"]
+    D --> E["Rebuild the unfinished roadmap"]
+    E --> F["Check time limits and prerequisites"]
+    F --> G{"Is the new plan valid?"}
+    G -- "Yes" --> H["Save the updated timetable"]
+    G -- "No" --> I["Keep the previous plan and explain the issue"]
+    C -- "Quiz result" --> J["Update topic mastery"]
+    J --> K["Share a progress insight"]
+```
+
+### 3. Reading a timetable image
+
+Upload a screenshot of your weekly timetable and JASSI will try to read the classes from it. The extracted events are normalized, checked, and shown for review before they are added. If an imported class overlaps an existing event, you can decide whether the imported timetable should replace that conflicting event.
+
+```mermaid
+flowchart TD
+    A["Upload timetable image"] --> B["Read the image with vision AI"]
+    B --> C["Extract class names, days and times"]
+    C --> D["Normalize and validate events"]
+    D --> E{"Were usable events found?"}
+    E -- "No" --> F["Try a clearer image"]
+    E -- "Yes" --> G["Review imported events"]
+    G --> H["Check for calendar conflicts"]
+    H --> I{"Replace conflicting events?"}
+    I -- "Yes" --> J["Replace only overlapping events"]
+    I -- "No" --> K["Keep existing events"]
+    J --> L["Save imported timetable"]
+    K --> L
+```
+
+## Project structure
+
+Here is where the main parts of the project live:
+
+```text
+JASSI/
 ├── app/
-│   ├── streamlit_app.py       # Dashboard UI
-│   ├── graph.py               # LangGraph workflow (LLM + tool nodes)
+│   ├── streamlit_app.py       # The dashboard you interact with
+│   ├── graph.py               # Connects the steps in the AI workflow
 │   ├── nodes/
-│   │   ├── llm_nodes.py       # Groq API calls (NLU, NLG, reasoning)
-│   │   └── tool_nodes.py      # Deterministic wrappers used by the graph
+│   │   ├── llm_nodes.py       # Groq calls for understanding and explanations
+│   │   └── tool_nodes.py      # Connects workflow steps to Python tools
 │   ├── tools/
-│   │   ├── feasibility.py     # Required vs available hours
-│   │   ├── scheduler.py       # Constraint-satisfaction session placement
-│   │   ├── verifier.py        # Conflict / prerequisite / deadline checks
-│   │   └── constraint_parser.py  # Manual / image / Google Calendar import
+│   │   ├── constraint_parser.py  # Reads and checks timetable events
+│   │   ├── feasibility.py        # Estimates available study time
+│   │   ├── scheduler.py          # Places study sessions
+│   │   ├── verifier.py           # Checks the finished plan
+│   │   ├── schedule_recovery.py  # Rebuilds the unfinished plan
+│   │   └── resource_lookup.py    # Finds learning resources
 │   └── vectorstore/
-│       └── resource_retriever.py  # FAISS semantic search over resources
+│       └── resource_retriever.py # Searches resources by meaning
 ├── data/
-│   ├── topics.json            # Topic dependency graph
-│   ├── resources.json         # Learning resource catalog
-│   └── demo_student.json      # Seed student state (mastery, calendar)
-├── tests/                     # Unit tests for the deterministic tools
-├── demo_script.py             # Runs the 7(+2)-step end-to-end scenario in a terminal
+│   ├── topics.json             # Topics and their prerequisites
+│   ├── resources.json          # Learning resource collection
+│   └── demo_student.json      # Example student data
+├── tests/                      # Automated tests
+├── demo_script.py              # Runs an example workflow in the terminal
 ├── requirements.txt
 └── .env.example
 ```
 
-## Setup (Windows PowerShell or CMD)
+## Get it running
 
-1. Install **Python 3.12** from https://www.python.org/downloads/.
-2. Open a terminal in the repository root and create the environment **once**:
+### What you need
 
-   **Windows CMD**
-   ```cmd
-   py -3.12 -m venv .venv
-   .venv\Scripts\activate.bat
-   ```
+- Python 3.12
+- A Groq API key ([create one here](https://console.groq.com/keys))
+- Git, if you are cloning the repository
 
-   **Windows PowerShell**
-   ```powershell
-   py -3.12 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   ```
+### 1. Get the project
 
-3. Install dependencies:
-   ```bash
-   python -m pip install --upgrade pip
-   python -m pip install -r requirements.txt
-   ```
-4. Create a Groq API key at https://console.groq.com/keys.
-5. Create your local `.env` file:
-   ```cmd
-   copy .env.example .env
-   ```
-   Add your key to `.env`:
-   ```env
-   GROQ_API_KEY=gsk_your_actual_key_here
-   ```
-6. Start the dashboard:
-   ```bash
-   streamlit run app/streamlit_app.py
-   ```
-7. Run tests:
-   ```bash
-   python -m unittest discover -s tests -v
-   ```
+```bash
+git clone <your-repository-url>
+cd JASSI
+```
 
-**Never commit `.env` or a real API key to GitHub.** `.env` is for local development. For Streamlit Community Cloud, add `GROQ_API_KEY = "gsk_..."` in the app's **Settings → Secrets** panel. The app reads the same environment variable in both places.
+If you already have the project downloaded, open a terminal in its root folder instead.
 
-### macOS / Linux
+### 2. Create a virtual environment
+
+**Windows PowerShell**
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+**Windows Command Prompt**
+
+```cmd
+py -3.12 -m venv .venv
+.venv\Scripts\activate.bat
+```
+
+**macOS / Linux**
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
+```
+
+### 3. Install the packages
+
+```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+```
+
+### 4. Add your API key
+
+Make a local copy of the example environment file:
+
+**Windows**
+
+```cmd
+copy .env.example .env
+```
+
+**macOS / Linux**
+
+```bash
 cp .env.example .env
+```
+
+Open `.env` and add your Groq key:
+
+```env
+GROQ_API_KEY=your_groq_api_key_here
+```
+
+The example file also includes optional model settings. You can leave those as they are to use the defaults.
+
+> Keep your real `.env` file private. Do not commit API keys or secrets to GitHub.
+
+### 5. Start JASSI
+
+```bash
 streamlit run app/streamlit_app.py
 ```
 
-### Planning flow and student preferences
+Streamlit will print a local URL in your terminal. Open that URL in your browser to use the dashboard.
 
-JASSI now presents resource paths before making a feasibility claim. Choose a curated learning path, or add your own learning resources in the planning flow using one entry per line:
+## Try the demo
 
-```text
-Topic ID | Resource title | https://resource-url | estimated minutes
+You can also run the sample workflow from the terminal:
+
+```bash
+python demo_script.py
 ```
 
-For example:
+The demo walks through a learning request, a feasibility check, resource selection, schedule creation, and plan verification. It then demonstrates a missed session and a quiz update.
 
-```text
-graphs | Graph Algorithms playlist | https://www.youtube.com/playlist?list=YOUR_ID | 240
+The demo uses the Groq API, so make sure your `.env` file is configured first.
+
+## Run the tests
+
+From the project root, run:
+
+```bash
+python -m pytest -q
 ```
 
-The URL and duration are user-provided; JASSI does not claim to crawl or verify course contents. Check the provider's current syllabus and duration before relying on it.
+The tests cover the core planning tools, including timetable parsing, scheduling, feasibility checks, recovery, resource lookup, and verification.
 
-Use **Study & routine preferences** in the sidebar to set your maximum study hours per day, wake/sleep times, meal-break start times, and recovery gap between sessions. JASSI uses these limits when estimating capacity and placing sessions. The feasibility check is run against the resources you actually select, not only a generic topic-hours estimate.
+## Timetable imports
 
-## Deploy on Streamlit Community Cloud
+JASSI can accept timetable events from manual entries and timetable images. The image parser uses the configured vision model and can use local OCR as a fallback when available.
 
-1. Push this repository to GitHub (keep `.env` out of the commit; `.gitignore` excludes it).
-2. In https://share.streamlit.io/, choose **New app**, select this repository and branch, and set the main file to `app/streamlit_app.py`.
-3. Open **Advanced settings → Secrets** and add:
-   ```toml
-   GROQ_API_KEY = "gsk_your_actual_key_here"
-   ```
-4. Deploy. `GroqClient` reads the key from Streamlit Secrets in the cloud and from `.env` locally.
+For image imports, the parser understands common time formats such as `08:30`, `8:30 AM`, and `14:30`. It also checks that the end time is later than the start time and removes duplicate events.
 
-## Semantic search note
+Google Calendar event normalization is present in the code, but the Google Calendar OAuth connection is not wired up yet. The app currently treats calendar commitments as recurring by weekday in several planning steps, so it is not a full date-by-date calendar sync.
 
-`resource_retriever.py` tries to build a FAISS index using a small
-`sentence-transformers` embedding model on first run. If your machine can't
-download the model weights (e.g. no internet at judging time), it automatically
-falls back to a TF-IDF vector space — the app still runs and still retrieves by
-concept similarity rather than exact keyword match, it's just a lighter-weight
-notion of "semantic." Nothing else in the app changes.
+## How resource search works
 
-## Demo scenario (matches the required failure/replan flow)
+JASSI searches its resource collection by meaning, not just exact words. It tries to create a FAISS index using a sentence-transformers model. If the model cannot be downloaded or FAISS is unavailable, it falls back to TF-IDF search.
 
-1. Import calendar constraints (manual entry, image upload with LLM parsing, or Google Calendar)
-2. Create a planning request in natural language: *"I wanna finish trees and graphs in 10 days with 70% mastery"*
-3. LLM parses it into a structured request
-4. Deterministic feasibility check finds a shortfall
-5. LLM generates a Reality Check with 3 trade-off options; user picks one
-6. FAISS retrieves relevant resources by meaning, not keywords; a schedule is built and verified
-7. LLM explains why the schedule looks the way it does
-8. User reports a missed session → the app rebuilds all unfinished sessions in prerequisite order and verifies the complete replacement roadmap
-9. User submits a low quiz score → mastery updates via the Bayesian formula and the LLM surfaces a progress insight
+This fallback keeps resource lookup usable in environments where downloading embedding models is not possible.
 
-`demo_script.py` runs the LLM + deterministic planning and progress flow from the terminal. For the live judging sequence, follow [DEMO_RUNTHROUGH.md](DEMO_RUNTHROUGH.md): create a dependency-ordered roadmap, miss a session, and show whole-roadmap recovery.
+## Current limitations
 
-## Known limitations / next steps
+A few parts are still works in progress:
 
-- Google Calendar import is stubbed with a normalizer function
-  (`parse_google_calendar_events`) ready to receive fetched events — the OAuth
-  redirect itself isn't wired up in this build.
-- Calendar commitments repeat by weekday; multi-week availability is therefore
-  an estimate rather than a fully imported date-specific calendar.
-- User-supplied resources are selected using the title, URL, and duration the
-  student enters. JASSI does not automatically crawl arbitrary course pages.
-- Drag-and-drop manual timetable editing is not implemented yet.
-- Recovery rebuilds all unfinished sessions in prerequisite order, keeps completed work as history, respects the original remaining deadline and daily limits, and commits only after the full candidate roadmap passes verification. If the remaining work cannot fit, it preserves the prior active roadmap and records a recovery failure rather than silently extending the deadline.
-- Student state is currently stored in a shared local JSON file (`data/demo_student.json`). This is suitable for a single-user demo, not a concurrent multi-user deployment. Add authentication and per-user database records before exposing private student data to multiple users.
-- Recovery runs when the Streamlit app executes (startup/rerun); there is no independent background worker that monitors deadlines while the app is closed.
+- **Google Calendar:** Event normalization exists, but OAuth sign-in and live event fetching are not connected.
+- **Calendar dates:** Some planning logic uses recurring weekday commitments rather than a complete date-specific calendar.
+- **Resource details:** User-added resources are based on the title, URL, and duration entered by the student. JASSI does not crawl every external course page.
+- **Timetable editing:** Drag-and-drop editing is not available yet. You can manage events through the current calendar controls.
+- **Student storage:** The demo stores student state in a local JSON file. It is intended for a single-user demo, not concurrent multi-user use.
+- **Background updates:** Recovery runs when the Streamlit app runs; there is no separate worker monitoring deadlines while the app is closed.
+
+## Built with
+
+- [Python](https://www.python.org/)
+- [Streamlit](https://streamlit.io/)
+- [LangGraph](https://langchain-ai.github.io/langgraph/)
+- [Groq](https://groq.com/)
+- [FAISS](https://github.com/facebookresearch/faiss)
+- [Sentence Transformers](https://www.sbert.net/)
+- [scikit-learn](https://scikit-learn.org/)
+
+---
+
+Made to make learning plans a little more realistic—and a lot easier to adjust.

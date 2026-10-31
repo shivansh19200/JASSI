@@ -93,6 +93,9 @@ def _normalize_timetable_time(value: Any) -> str:
     """
     import re
     raw = str(value or "").strip().upper()
+    # OCR often reads zero/one as letters and prints meridiem with dots
+    # (for example, ``8.30 p.m.``). Normalize those variants before parsing.
+    raw = re.sub(r"\b([AP])\s*\.?\s*M\.?", r"\1M", raw)
     raw = raw.replace(".", ":").replace("O", "0").replace("I", "1")
     raw = re.sub(r"\s+", " ", raw)
     match = re.fullmatch(r"(\d{1,2})(?::(\d{1,2}))?\s*(AM|PM)?", raw)
@@ -249,14 +252,29 @@ def _extract_json_payload(raw: Any) -> Any:
 
 
 def _event_time_fields(item: Dict[str, Any]):
-    """Read common field-name and time-range variants from vision output."""
+    """Read common field-name and time-range variants from vision output.
+
+    Vision responses sometimes include an empty canonical key alongside a
+    populated alias (for example ``start: null`` and ``start_time: "09:00"``).
+    Prefer the first non-empty value instead of letting the empty key mask it.
+    """
     import re
-    start = item.get("start", item.get("start_time", item.get("from")))
-    end = item.get("end", item.get("end_time", item.get("to")))
-    if (start is None or end is None) and item.get("time_range"):
-        parts = re.split(r"\s*(?:-|–|—|to)\s*", str(item["time_range"]), maxsplit=1, flags=re.I)
+
+    def first_value(*keys):
+        for key in keys:
+            value = item.get(key)
+            if value is not None and str(value).strip():
+                return value
+        return None
+
+    start = first_value("start", "start_time", "from")
+    end = first_value("end", "end_time", "to")
+    time_range = first_value("time_range", "time", "hours")
+    if (start is None or end is None) and time_range:
+        parts = re.split(r"\s*(?:-|–|—|\bto\b)\s*", str(time_range), maxsplit=1, flags=re.I)
         if len(parts) == 2:
-            start, end = parts
+            start = start or parts[0]
+            end = end or parts[1]
     return _normalize_timetable_time(start), _normalize_timetable_time(end)
 
 
@@ -322,8 +340,12 @@ def parse_image_with_llm(llm_client, image_bytes: bytes) -> List[Dict[str, Any]]
     for item in events_raw:
         if not isinstance(item, dict):
             continue
-        title = " ".join(str(item.get("title", item.get("course", item.get("name", ""))) or "").split())
-        day_raw = str(item.get("day", item.get("weekday", "")) or "").strip().title()
+        title_value = next((item.get(key) for key in ("title", "course", "name")
+                            if item.get(key) is not None and str(item.get(key)).strip()), "")
+        day_value = next((item.get(key) for key in ("day", "weekday")
+                          if item.get(key) is not None and str(item.get(key)).strip()), "")
+        title = " ".join(str(title_value).split())
+        day_raw = str(day_value).strip().rstrip(".").title()
         day = day_raw if day_raw in valid_days else day_aliases.get(day_raw[:3].lower())
         if not title or not day:
             continue

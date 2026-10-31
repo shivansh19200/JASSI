@@ -44,6 +44,34 @@ class TestTimetableImageParser(unittest.TestCase):
         self.assertEqual(_normalize_timetable_time("0800"), "08:00")
         self.assertEqual(_normalize_timetable_time("6:30 PM"), "18:30")
 
+    def test_normalizes_dotted_meridiem(self):
+        self.assertEqual(_normalize_timetable_time("8.30 a.m."), "08:30")
+        self.assertEqual(_normalize_timetable_time("2:15 p.m."), "14:15")
+
+    def test_uses_populated_alias_when_canonical_time_field_is_empty(self):
+        response = {"events": [{
+            "title": "", "course": "Maths Tutorial",
+            "day": None, "weekday": "Tue.",
+            "start": None, "start_time": "9:00 AM",
+            "end": "", "end_time": "10:00 AM",
+        }]}
+        events = parse_image_with_llm(FakeVisionClient(json.dumps(response)), b"fake-image")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["title"], "Maths Tutorial")
+        self.assertEqual(events[0]["day"], "Tuesday")
+        self.assertEqual(events[0]["start"], "09:00")
+        self.assertEqual(events[0]["end"], "10:00")
+
+    def test_fills_missing_time_fields_from_range(self):
+        response = {"events": [{
+            "title": "Physics Lab", "day": "Friday",
+            "start": None, "end": None, "time_range": "2:00 p.m. to 4:00 p.m."
+        }]}
+        events = parse_image_with_llm(FakeVisionClient(json.dumps(response)), b"fake-image")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["start"], "14:00")
+        self.assertEqual(events[0]["end"], "16:00")
+
     def test_accepts_wrapped_json_and_alternate_event_field_names(self):
         response = "Here are the events:\n```json\n{\"events\":[{\"course\":\"PHY F101 Tutorial\",\"weekday\":\"Mon\",\"time_range\":\"09:00 - 09:50\"}]}\n```"
         events = parse_image_with_llm(FakeVisionClient(response), b"fake-image")
